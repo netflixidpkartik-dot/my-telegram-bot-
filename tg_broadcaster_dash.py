@@ -114,6 +114,44 @@ async def send_dashboard(bot, chat_id, msg_to_edit=None):
 #  BROADCAST LOOP
 # ─────────────────────────────────────────────
 
+async def broadcast_account(label, acc, interval, bot, owner_id):
+    """Broadcast from a single account to all its groups."""
+    try:
+        client = TelegramClient(acc["session"], SHARED_API_ID, SHARED_API_HASH)
+        await client.connect()
+        msg = await get_saved_message(client)
+        if not msg:
+            log(label, "No message in Saved Messages.")
+            await client.disconnect()
+            return
+
+        groups  = await get_groups(client)
+        success = 0
+        failed  = 0
+
+        for dialog in groups:
+            try:
+                if msg.text:
+                    await client.send_message(dialog.entity, msg.text)
+                elif msg.media:
+                    await client.send_file(dialog.entity, msg.media, caption=msg.text or "")
+                success += 1
+            except Exception as e:
+                failed += 1
+                log(label, f"Failed → {dialog.name}: {e}")
+            await asyncio.sleep(interval)
+
+        cfg2 = load_config()
+        cfg2["analytics"]["total_sent"]   += success
+        cfg2["analytics"]["total_failed"] += failed
+        cfg2["analytics"]["rounds"]       += 1
+        save_config(cfg2)
+        log(label, f"Round done — ✅ {success} sent ❌ {failed} failed")
+        await client.disconnect()
+
+    except Exception as e:
+        log(label, f"Error: {e}")
+
 async def broadcast_loop(bot, owner_id):
     active_seconds = REST_HOURS * 3600
     rest_seconds   = REST_DURATION * 3600
@@ -129,43 +167,14 @@ async def broadcast_loop(bot, owner_id):
             while asyncio.get_event_loop().time() - phase_start < active_seconds:
                 cfg      = load_config()
                 interval = cfg["interval"]
+                accounts = cfg["accounts"]
 
-                for label, acc in list(cfg["accounts"].items()):
-                    try:
-                        client = TelegramClient(acc["session"], SHARED_API_ID, SHARED_API_HASH)
-                        await client.connect()
-                        msg = await get_saved_message(client)
-                        if not msg:
-                            log(label, "No message in Saved Messages.")
-                            await client.disconnect()
-                            continue
-
-                        groups  = await get_groups(client)
-                        success = 0
-                        failed  = 0
-
-                        for dialog in groups:
-                            try:
-                                if msg.text:
-                                    await client.send_message(dialog.entity, msg.text)
-                                elif msg.media:
-                                    await client.send_file(dialog.entity, msg.media, caption=msg.text or "")
-                                success += 1
-                            except Exception as e:
-                                failed += 1
-                                log(label, f"Failed → {dialog.name}: {e}")
-                            await asyncio.sleep(interval)
-
-                        cfg2 = load_config()
-                        cfg2["analytics"]["total_sent"]   += success
-                        cfg2["analytics"]["total_failed"] += failed
-                        cfg2["analytics"]["rounds"]       += 1
-                        save_config(cfg2)
-                        log(label, f"Round done — ✅ {success} sent ❌ {failed} failed")
-                        await client.disconnect()
-
-                    except Exception as e:
-                        log(label, f"Error: {e}")
+                if accounts:
+                    # Run all accounts in parallel simultaneously
+                    await asyncio.gather(*[
+                        broadcast_account(label, acc, interval, bot, owner_id)
+                        for label, acc in accounts.items()
+                    ])
 
                 await asyncio.sleep(5)
 

@@ -321,9 +321,7 @@ def txt_payment(name, addr, total):
         f"💰 Amount Due: <code>${total:.2f} USDT</code>\n\n"
         f"📬 <b>Send Exact Amount To:</b>\n"
         f"<code>{addr}</code>\n\n"
-        f"⚠️ <i>Send the exact amount shown above.\n"
-        f"Please wait while our team verifies your payment.\n"
-        f"Your card details will be shown in My Orders once the order is complete.</i>"
+        f"⚠️ <i>Send the exact amount shown above.</i>"
     )
 
 def txt_success(order_ref):

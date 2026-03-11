@@ -425,10 +425,11 @@ def txt_orders(orders: list) -> str:
         ref, ctype, cnum, climit, cvalid, price, network, status, created = o
         safe_ref = ref.replace("#", "\\#")
         status_icon = "⏳" if status == "pending" else "✅"
+        st_up = status.upper()
         lines.append(
             f"{status_icon} `{safe_ref}`\n"
             f"   💳 {ctype} ••••{cnum}\n"
-            f"   💰 ${price:.2f} \\| 📅 {created[:10]} \\| {status\\.upper()}"
+            f"   💰 ${price:.2f} \\| 📅 {created[:10]} \\| {st_up}"
         )
     return "📦 *My Orders*\n\n" + "\n\n".join(lines)
 
@@ -508,7 +509,8 @@ async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for o in recent[:10]:
         ref, ctype, price, network, status, created, name, uname = o
         safe_ref = ref.replace("#", "\\#")
-        lines.append(f"• `{safe_ref}` {ctype} \\— ${price:.2f} \\| {name} @{uname} \\| {status}")
+        s_upper = status.upper()
+        lines.append(f"• `{safe_ref}` {ctype} \\— ${price:.2f} \\| {name} @{uname} \\| {s_upper}")
 
     await update.message.reply_text(
         "\n".join(lines),

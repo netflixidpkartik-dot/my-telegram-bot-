@@ -321,8 +321,9 @@ def txt_payment(name, addr, total):
         f"💰 Amount Due: <code>${total:.2f} USDT</code>\n\n"
         f"📬 <b>Send Exact Amount To:</b>\n"
         f"<code>{addr}</code>\n\n"
-        f"⚠️ <i>Send exact amount shown. Include network fees separately.\n"
-        f"Do not send from exchange wallets directly.</i>"
+        f"⚠️ <i>Send the exact amount shown above.\n"
+        f"Please wait while our team verifies your payment.\n"
+        f"Your card details will be shown in My Orders once the order is complete.</i>"
     )
 
 def txt_success(order_ref):
@@ -330,8 +331,8 @@ def txt_success(order_ref):
         f"🎉 <b>Thank You for Your Purchase!</b>\n\n"
         f"Your payment has been received and is awaiting verification.\n\n"
         f"📋 Order Reference: <code>{order_ref}</code>\n\n"
-        f"⏳ <i>Payment verification takes 10-30 minutes.\n"
-        f"Your card will appear in My Orders once confirmed.</i>\n\n"
+        f"⏳ <i>Please wait while our team verifies your payment.\n"
+        f"Your card details will be shown in My Orders section once your order is complete.</i>\n\n"
         f"💛 Thanks for shopping with <b>4xCardsShop</b>!"
     )
 

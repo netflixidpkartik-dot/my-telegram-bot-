@@ -270,7 +270,8 @@ HTML = "HTML"
 def txt_welcome(name):
     return (
         f"🏦 <b>Welcome to 4xCardsShop, {name}!</b>\n\n"
-        "🌟 <i>Institutional Grade Virtual Cards</i>\n"
+        "🌟 <i>Premium Cards at Affordable Rates — Access Cards from All Regions!</i>\n"
+        "🙏 <i>Thanks for Choosing Us!</i>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "💳 VISA  •  Mastercard  •  AMEX\n"
         "₿  Crypto payments  •  ⚡ Instant delivery\n"

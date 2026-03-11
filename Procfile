@@ -1,1 +1,1 @@
-worker: python bot.py
+worker: python 4xcards_bot.py

@@ -22,6 +22,8 @@ clients = {}
 broadcast_task = None
 
 
+# ---------- CONFIG ----------
+
 def load_cfg():
     if os.path.exists(CONFIG):
         with open(CONFIG) as f:
@@ -29,9 +31,9 @@ def load_cfg():
     return {"owner": 0, "accounts": {}, "interval": DEFAULT_INTERVAL, "auto_dm": ""}
 
 
-def save_cfg(c):
+def save_cfg(data):
     with open(CONFIG, "w") as f:
-        json.dump(c, f, indent=2)
+        json.dump(data, f, indent=2)
 
 
 def load_replied():
@@ -46,6 +48,8 @@ def save_replied(data):
         json.dump(data, f, indent=2)
 
 
+# ---------- TELEGRAM HELPERS ----------
+
 async def create_logs_channel(client, label):
     result = await client(
         CreateChannelRequest(
@@ -56,6 +60,16 @@ async def create_logs_channel(client, label):
     )
     return result.chats[0].id
 
+
+async def get_groups(client):
+    groups = []
+    async for dialog in client.iter_dialogs():
+        if dialog.is_group:
+            groups.append(dialog)
+    return groups
+
+
+# ---------- ACCOUNT ENGINE ----------
 
 async def start_account(label, acc):
 
@@ -94,6 +108,8 @@ async def start_account(label, acc):
             pass
 
 
+# ---------- BROADCAST ENGINE ----------
+
 async def broadcast_cycle():
 
     cfg = load_cfg()
@@ -127,11 +143,7 @@ async def broadcast_cycle():
                     await client.send_message(dialog.id, message.text)
 
                 elif message.media:
-                    await client.send_file(
-                        dialog.id,
-                        message.media,
-                        caption=message.text
-                    )
+                    await client.send_file(dialog.id, message.media, caption=message.text)
 
                 success += 1
 
@@ -173,6 +185,8 @@ async def broadcast_loop():
         await asyncio.sleep(CYCLE_DELAY)
 
 
+# ---------- BOT ----------
+
 async def run_bot():
 
     global broadcast_task
@@ -182,6 +196,7 @@ async def run_bot():
 
     cfg = load_cfg()
 
+    # start existing accounts
     for label, acc in cfg["accounts"].items():
         asyncio.create_task(start_account(label, acc))
 
@@ -240,7 +255,6 @@ async def run_bot():
                 return
 
             broadcast_task = asyncio.create_task(broadcast_loop())
-
             await event.respond("Ads Started")
 
         elif data == "stop":

@@ -5,22 +5,15 @@ import random
 
 from telethon import TelegramClient, events, Button
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
-
-# ===== ENV VARIABLES =====
+from telethon.tl.functions.channels import CreateChannelRequest
 
 BOT_TOKEN = "8665346412:AAF-QqT8nUot2xeoomXPzGjKt1lGFZni3f8"
 API_ID = 34564865
 API_HASH = "07b94d63a077ddd7a222d64d8362c7b0"
 
-if not BOT_TOKEN or not API_ID or not API_HASH:
-    raise Exception("BOT_TOKEN / API_ID / API_HASH missing in environment variables")
-
-API_ID = int(API_ID)
-
-# =========================
-
 CONFIG = "accounts.json"
-DEFAULT_INTERVAL = 120
+DEFAULT_INTERVAL = 90
+CYCLE_DELAY = 60
 
 state = {}
 broadcast_task = None
@@ -40,6 +33,7 @@ def save_cfg(c):
 
 
 async def get_groups(client):
+
     groups = []
 
     async for dialog in client.iter_dialogs():
@@ -49,9 +43,25 @@ async def get_groups(client):
     return groups
 
 
+async def create_logs_group(client, label):
+
+    result = await client(
+        CreateChannelRequest(
+            title=f"{label} Logs",
+            about="Account logs",
+            megagroup=True
+        )
+    )
+
+    channel = result.chats[0]
+
+    return channel.id
+
+
 async def broadcast_account(label, acc, interval):
 
     client = TelegramClient(acc["session"], API_ID, API_HASH)
+
     await client.connect()
 
     msg = await client.get_messages("me", limit=1)
@@ -61,7 +71,11 @@ async def broadcast_account(label, acc, interval):
         return
 
     message = msg[0]
+
     groups = await get_groups(client)
+
+    success = 0
+    failed = 0
 
     for g in groups:
 
@@ -73,18 +87,39 @@ async def broadcast_account(label, acc, interval):
             elif message.media:
                 await client.send_file(g.id, message.media, caption=message.text)
 
-            delay = random.randint(interval, interval + 60)
+            success += 1
+
+            await client.send_message(
+                acc["log_channel"],
+                f"Sent → {g.name}"
+            )
+
+            delay = random.randint(interval, interval + 30)
 
             await asyncio.sleep(delay)
 
         except FloodWaitError as e:
 
-            print("Flood wait:", e.seconds)
+            await client.send_message(
+                acc["log_channel"],
+                f"Flood wait {e.seconds}s"
+            )
+
             await asyncio.sleep(e.seconds)
 
-        except Exception as err:
+        except Exception:
 
-            print("Send failed:", err)
+            failed += 1
+
+            await client.send_message(
+                acc["log_channel"],
+                f"Failed → {g.name}"
+            )
+
+    await client.send_message(
+        acc["log_channel"],
+        f"Cycle done\nSuccess: {success}\nFailed: {failed}"
+    )
 
     await client.disconnect()
 
@@ -96,15 +131,14 @@ async def broadcast_loop():
         cfg = load_cfg()
 
         interval = cfg["interval"]
+
         accounts = cfg["accounts"]
 
         for label, acc in accounts.items():
 
-            print("Running account:", label)
-
             await broadcast_account(label, acc, interval)
 
-        await asyncio.sleep(10)
+        await asyncio.sleep(CYCLE_DELAY)
 
 
 async def run_bot():
@@ -114,8 +148,6 @@ async def run_bot():
     bot = TelegramClient("bot_session", API_ID, API_HASH)
 
     await bot.start(bot_token=BOT_TOKEN)
-
-    print("BOT STARTED")
 
     @bot.on(events.NewMessage(pattern="/start"))
     async def start(event):
@@ -136,9 +168,10 @@ async def run_bot():
                 [Button.inline("My Accounts", b"accs")],
                 [Button.inline("Start Ads", b"start"),
                  Button.inline("Stop Ads", b"stop")],
-                [Button.inline("Set Interval", b"interval")],
+                [Button.inline("Set Interval", b"interval")]
             ],
         )
+
 
     @bot.on(events.CallbackQuery)
     async def callback(event):
@@ -173,7 +206,7 @@ async def run_bot():
 
             state[uid] = {"step": "interval"}
 
-            await event.respond("Send interval seconds")
+            await event.respond("Send group interval seconds")
 
         elif data == "start":
 
@@ -190,6 +223,7 @@ async def run_bot():
                 broadcast_task.cancel()
 
             await event.respond("Ads Stopped")
+
 
     @bot.on(events.NewMessage)
     async def handler(event):
@@ -213,6 +247,7 @@ async def run_bot():
 
             await event.respond("Interval Updated")
 
+
         elif step == "phone":
 
             phone = event.text.strip()
@@ -230,10 +265,11 @@ async def run_bot():
                 "client": client,
                 "phone": phone,
                 "hash": result.phone_code_hash,
-                "label": label,
+                "label": label
             }
 
             await event.respond("Send OTP")
+
 
         elif step == "otp":
 
@@ -246,29 +282,33 @@ async def run_bot():
                 await client.sign_in(
                     phone=s["phone"],
                     code=event.text,
-                    phone_code_hash=s["hash"],
+                    phone_code_hash=s["hash"]
                 )
 
                 me = await client.get_me()
+
+                log_channel = await create_logs_group(client, s["label"])
 
                 await client.disconnect()
 
                 cfg["accounts"][s["label"]] = {
                     "session": f"session_{s['label']}",
                     "name": me.first_name,
+                    "log_channel": log_channel
                 }
 
                 save_cfg(cfg)
 
                 del state[uid]
 
-                await event.respond("Account Added")
+                await event.respond("Account Added + Logs Group Created")
 
             except SessionPasswordNeededError:
 
                 state[uid]["step"] = "2fa"
 
                 await event.respond("Send 2FA Password")
+
 
         elif step == "2fa":
 
@@ -280,18 +320,22 @@ async def run_bot():
 
             me = await client.get_me()
 
+            log_channel = await create_logs_group(client, s["label"])
+
             await client.disconnect()
 
             cfg["accounts"][s["label"]] = {
                 "session": f"session_{s['label']}",
                 "name": me.first_name,
+                "log_channel": log_channel
             }
 
             save_cfg(cfg)
 
             del state[uid]
 
-            await event.respond("Account Added")
+            await event.respond("Account Added + Logs Group Created")
+
 
     await bot.run_until_disconnected()
 

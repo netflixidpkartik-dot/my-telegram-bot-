@@ -16,6 +16,7 @@ CYCLE_DELAY = 60
 
 state = {}
 broadcast_task = None
+dm_tasks = {}
 
 
 def load_cfg():
@@ -23,7 +24,7 @@ def load_cfg():
         with open(CONFIG) as f:
             return json.load(f)
 
-    return {"owner": 0, "accounts": {}, "interval": DEFAULT_INTERVAL}
+    return {"owner": 0, "accounts": {}, "interval": DEFAULT_INTERVAL, "auto_dm": ""}
 
 
 def save_cfg(c):
@@ -39,7 +40,6 @@ async def get_dialogs(client):
 
 
 async def create_logs_channel(client, label):
-
     result = await client(
         CreateChannelRequest(
             title=f"{label} Logs",
@@ -47,16 +47,36 @@ async def create_logs_channel(client, label):
             megagroup=False
         )
     )
-
     channel = result.chats[0]
-
     return channel.id
+
+
+async def start_auto_dm(client, message):
+
+    @client.on(events.NewMessage(incoming=True))
+    async def handler(event):
+
+        if not message:
+            return
+
+        if event.is_private and not event.out:
+
+            try:
+                await event.reply(message)
+            except:
+                pass
 
 
 async def broadcast_account(label, acc, interval):
 
     client = TelegramClient(acc["session"], API_ID, API_HASH)
+
     await client.connect()
+
+    cfg = load_cfg()
+
+    if cfg["auto_dm"]:
+        await start_auto_dm(client, cfg["auto_dm"])
 
     msg = await client.get_messages("me", limit=1)
 
@@ -73,7 +93,6 @@ async def broadcast_account(label, acc, interval):
 
     for g in dialogs:
 
-        # only groups (no DM, no saved msg)
         if not g.is_group:
             continue
 
@@ -133,6 +152,7 @@ async def broadcast_loop():
         accounts = cfg["accounts"]
 
         for label, acc in accounts.items():
+
             await broadcast_account(label, acc, interval)
 
         await asyncio.sleep(CYCLE_DELAY)
@@ -143,6 +163,7 @@ async def run_bot():
     global broadcast_task
 
     bot = TelegramClient("bot_session", API_ID, API_HASH)
+
     await bot.start(bot_token=BOT_TOKEN)
 
     @bot.on(events.NewMessage(pattern="/start"))
@@ -165,7 +186,8 @@ async def run_bot():
                 [Button.inline("Remove Account", b"del")],
                 [Button.inline("Start Ads", b"start"),
                  Button.inline("Stop Ads", b"stop")],
-                [Button.inline("Set Interval", b"interval")]
+                [Button.inline("Set Interval", b"interval")],
+                [Button.inline("Set Auto DM", b"autodm")]
             ],
         )
 
@@ -205,6 +227,12 @@ async def run_bot():
 
             await event.respond("Send group interval seconds")
 
+        elif data == "autodm":
+
+            state[uid] = {"step": "autodm"}
+
+            await event.respond("Send the auto DM message")
+
         elif data == "start":
 
             if broadcast_task and not broadcast_task.done():
@@ -230,9 +258,7 @@ async def run_bot():
             buttons = []
 
             for label, acc in cfg["accounts"].items():
-                buttons.append(
-                    [Button.inline(acc["name"], f"del_{label}".encode())]
-                )
+                buttons.append([Button.inline(acc["name"], f"del_{label}".encode())])
 
             await event.respond("Select account to remove", buttons=buttons)
 
@@ -276,6 +302,15 @@ async def run_bot():
 
             await event.respond("Interval Updated")
 
+        elif step == "autodm":
+
+            cfg["auto_dm"] = event.text
+
+            save_cfg(cfg)
+
+            del state[uid]
+
+            await event.respond("Auto DM message updated")
 
         elif step == "phone":
 
@@ -298,7 +333,6 @@ async def run_bot():
             }
 
             await event.respond("Send OTP")
-
 
         elif step == "otp":
 
@@ -337,7 +371,6 @@ async def run_bot():
                 state[uid]["step"] = "2fa"
 
                 await event.respond("Send 2FA Password")
-
 
         elif step == "2fa":
 

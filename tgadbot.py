@@ -10,7 +10,6 @@ from telethon.tl.functions.channels import CreateChannelRequest
 BOT_TOKEN = "8665346412:AAF-QqT8nUot2xeoomXPzGjKt1lGFZni3f8"
 API_ID = 34564865
 API_HASH = "07b94d63a077ddd7a222d64d8362c7b0"
-
 CONFIG = "accounts.json"
 DEFAULT_INTERVAL = 90
 CYCLE_DELAY = 60
@@ -32,11 +31,11 @@ def save_cfg(c):
         json.dump(c, f, indent=2)
 
 
-async def get_groups(client):
-    groups = []
+async def get_dialogs(client):
+    dialogs = []
     async for dialog in client.iter_dialogs():
-        groups.append(dialog)
-    return groups
+        dialogs.append(dialog)
+    return dialogs
 
 
 async def create_logs_channel(client, label):
@@ -57,7 +56,6 @@ async def create_logs_channel(client, label):
 async def broadcast_account(label, acc, interval):
 
     client = TelegramClient(acc["session"], API_ID, API_HASH)
-
     await client.connect()
 
     msg = await client.get_messages("me", limit=1)
@@ -68,14 +66,15 @@ async def broadcast_account(label, acc, interval):
 
     message = msg[0]
 
-    dialogs = await get_groups(client)
+    dialogs = await get_dialogs(client)
 
     success = 0
     failed = 0
 
     for g in dialogs:
 
-        if g.is_channel and not g.entity.megagroup:
+        # only groups (no DM, no saved msg)
+        if not g.is_group:
             continue
 
         try:
@@ -134,7 +133,6 @@ async def broadcast_loop():
         accounts = cfg["accounts"]
 
         for label, acc in accounts.items():
-
             await broadcast_account(label, acc, interval)
 
         await asyncio.sleep(CYCLE_DELAY)
@@ -145,7 +143,6 @@ async def run_bot():
     global broadcast_task
 
     bot = TelegramClient("bot_session", API_ID, API_HASH)
-
     await bot.start(bot_token=BOT_TOKEN)
 
     @bot.on(events.NewMessage(pattern="/start"))

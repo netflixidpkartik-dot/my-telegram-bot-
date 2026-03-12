@@ -8,9 +8,9 @@ from telethon.errors import FloodWaitError, SessionPasswordNeededError
 
 # ===== ENV VARIABLES =====
 
-BOT_TOKEN = os.getenv("8665346412:AAF-QqT8nUot2xeoomXPzGjKt1lGFZni3f8")
-API_ID = os.getenv("34564865")
-API_HASH = os.getenv("07b94d63a077ddd7a222d64d8362c7b0")
+BOT_TOKEN = "8665346412:AAF-QqT8nUot2xeoomXPzGjKt1lGFZni3f8"
+API_ID = 34564865
+API_HASH = "07b94d63a077ddd7a222d64d8362c7b0"
 
 if not BOT_TOKEN or not API_ID or not API_HASH:
     raise Exception("BOT_TOKEN / API_ID / API_HASH missing in environment variables")

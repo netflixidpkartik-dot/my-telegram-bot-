@@ -6,9 +6,9 @@ import random
 from telethon import TelegramClient, events, Button
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("8665346412:AAF-QqT8nUot2xeoomXPzGjKt1lGFZni3f8")
+API_ID = int(os.getenv("34564865"))
+API_HASH = os.getenv("07b94d63a077ddd7a222d64d8362c7b0")
 
 CONFIG = "accounts.json"
 DEFAULT_INTERVAL = 120

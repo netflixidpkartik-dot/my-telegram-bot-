@@ -10,20 +10,23 @@ from telethon.tl.functions.channels import CreateChannelRequest
 BOT_TOKEN = "8665346412:AAF-QqT8nUot2xeoomXPzGjKt1lGFZni3f8"
 API_ID = 34564865
 API_HASH = "07b94d63a077ddd7a222d64d8362c7b0"
+
 CONFIG = "accounts.json"
+REPLIED_FILE = "replied_users.json"
+
 DEFAULT_INTERVAL = 90
 CYCLE_DELAY = 60
 
 state = {}
 broadcast_task = None
-dm_tasks = {}
+dm_clients = {}
 
+# ---------- FILE HELPERS ----------
 
 def load_cfg():
     if os.path.exists(CONFIG):
         with open(CONFIG) as f:
             return json.load(f)
-
     return {"owner": 0, "accounts": {}, "interval": DEFAULT_INTERVAL, "auto_dm": ""}
 
 
@@ -32,12 +35,19 @@ def save_cfg(c):
         json.dump(c, f, indent=2)
 
 
-async def get_dialogs(client):
-    dialogs = []
-    async for dialog in client.iter_dialogs():
-        dialogs.append(dialog)
-    return dialogs
+def load_replied():
+    if os.path.exists(REPLIED_FILE):
+        with open(REPLIED_FILE) as f:
+            return json.load(f)
+    return {}
 
+
+def save_replied(data):
+    with open(REPLIED_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# ---------- TELEGRAM HELPERS ----------
 
 async def create_logs_channel(client, label):
     result = await client(
@@ -47,36 +57,63 @@ async def create_logs_channel(client, label):
             megagroup=False
         )
     )
-    channel = result.chats[0]
-    return channel.id
+    return result.chats[0].id
 
 
-async def start_auto_dm(client, message):
+async def get_groups(client):
+    groups = []
+    async for dialog in client.iter_dialogs():
+        if dialog.is_group:
+            groups.append(dialog)
+    return groups
+
+
+# ---------- AUTO DM SYSTEM ----------
+
+async def start_dm_listener(label, session):
+
+    cfg = load_cfg()
+    auto_msg = cfg["auto_dm"]
+
+    if not auto_msg:
+        return
+
+    replied = load_replied()
+
+    if label not in replied:
+        replied[label] = []
+
+    client = TelegramClient(session, API_ID, API_HASH)
+    await client.start()
+
+    dm_clients[label] = client
 
     @client.on(events.NewMessage(incoming=True))
     async def handler(event):
 
-        if not message:
+        if not event.is_private or event.out:
             return
 
-        if event.is_private and not event.out:
+        sender = await event.get_sender()
+        uid = sender.id
 
-            try:
-                await event.reply(message)
-            except:
-                pass
+        if uid in replied[label]:
+            return
 
+        try:
+            await event.reply(auto_msg)
+            replied[label].append(uid)
+            save_replied(replied)
+        except:
+            pass
+
+
+# ---------- BROADCAST SYSTEM ----------
 
 async def broadcast_account(label, acc, interval):
 
     client = TelegramClient(acc["session"], API_ID, API_HASH)
-
     await client.connect()
-
-    cfg = load_cfg()
-
-    if cfg["auto_dm"]:
-        await start_auto_dm(client, cfg["auto_dm"])
 
     msg = await client.get_messages("me", limit=1)
 
@@ -85,16 +122,12 @@ async def broadcast_account(label, acc, interval):
         return
 
     message = msg[0]
-
-    dialogs = await get_dialogs(client)
+    groups = await get_groups(client)
 
     success = 0
     failed = 0
 
-    for g in dialogs:
-
-        if not g.is_group:
-            continue
+    for g in groups:
 
         try:
 
@@ -111,9 +144,7 @@ async def broadcast_account(label, acc, interval):
                 f"Sent → {g.name}"
             )
 
-            delay = random.randint(interval, interval + 30)
-
-            await asyncio.sleep(delay)
+            await asyncio.sleep(random.randint(interval, interval + 30))
 
         except FloodWaitError as e:
 
@@ -124,7 +155,7 @@ async def broadcast_account(label, acc, interval):
 
             await asyncio.sleep(e.seconds)
 
-        except Exception:
+        except:
 
             failed += 1
 
@@ -146,25 +177,28 @@ async def broadcast_loop():
     while True:
 
         cfg = load_cfg()
-
         interval = cfg["interval"]
 
-        accounts = cfg["accounts"]
-
-        for label, acc in accounts.items():
-
+        for label, acc in cfg["accounts"].items():
             await broadcast_account(label, acc, interval)
 
         await asyncio.sleep(CYCLE_DELAY)
 
+
+# ---------- BOT ----------
 
 async def run_bot():
 
     global broadcast_task
 
     bot = TelegramClient("bot_session", API_ID, API_HASH)
-
     await bot.start(bot_token=BOT_TOKEN)
+
+    cfg = load_cfg()
+
+    # start DM listeners for existing accounts
+    for label, acc in cfg["accounts"].items():
+        asyncio.create_task(start_dm_listener(label, acc["session"]))
 
     @bot.on(events.NewMessage(pattern="/start"))
     async def start(event):
@@ -191,47 +225,35 @@ async def run_bot():
             ],
         )
 
-
     @bot.on(events.CallbackQuery)
     async def callback(event):
 
         global broadcast_task
 
         cfg = load_cfg()
-
         uid = event.sender_id
+        data = event.data.decode()
 
         if uid != cfg["owner"]:
             return
 
-        data = event.data.decode()
-
         if data == "add":
-
             state[uid] = {"step": "phone"}
-
             await event.respond("Send phone number with country code")
 
         elif data == "accs":
-
             txt = "Accounts\n\n"
-
             for l, a in cfg["accounts"].items():
                 txt += a["name"] + "\n"
-
             await event.respond(txt)
 
         elif data == "interval":
-
             state[uid] = {"step": "interval"}
-
-            await event.respond("Send group interval seconds")
+            await event.respond("Send interval seconds")
 
         elif data == "autodm":
-
             state[uid] = {"step": "autodm"}
-
-            await event.respond("Send the auto DM message")
+            await event.respond("Send auto DM message")
 
         elif data == "start":
 
@@ -239,7 +261,6 @@ async def run_bot():
                 return
 
             broadcast_task = asyncio.create_task(broadcast_loop())
-
             await event.respond("Ads Started")
 
         elif data == "stop":
@@ -251,14 +272,12 @@ async def run_bot():
 
         elif data == "del":
 
-            if not cfg["accounts"]:
-                await event.respond("No accounts to delete")
-                return
-
             buttons = []
 
             for label, acc in cfg["accounts"].items():
-                buttons.append([Button.inline(acc["name"], f"del_{label}".encode())])
+                buttons.append(
+                    [Button.inline(acc["name"], f"del_{label}".encode())]
+                )
 
             await event.respond("Select account to remove", buttons=buttons)
 
@@ -268,23 +287,15 @@ async def run_bot():
 
             if label in cfg["accounts"]:
 
-                session_file = f"session_{label}.session"
-
-                if os.path.exists(session_file):
-                    os.remove(session_file)
-
                 del cfg["accounts"][label]
-
                 save_cfg(cfg)
 
                 await event.respond("Account removed")
-
 
     @bot.on(events.NewMessage)
     async def handler(event):
 
         uid = event.sender_id
-
         cfg = load_cfg()
 
         if uid not in state:
@@ -295,31 +306,25 @@ async def run_bot():
         if step == "interval":
 
             cfg["interval"] = int(event.text)
-
             save_cfg(cfg)
-
             del state[uid]
 
-            await event.respond("Interval Updated")
+            await event.respond("Interval updated")
 
         elif step == "autodm":
 
             cfg["auto_dm"] = event.text
-
             save_cfg(cfg)
-
             del state[uid]
 
-            await event.respond("Auto DM message updated")
+            await event.respond("Auto DM updated")
 
         elif step == "phone":
 
             phone = event.text.strip()
-
-            label = f"acc{len(cfg['accounts']) + 1}"
+            label = f"acc{len(cfg['accounts'])+1}"
 
             client = TelegramClient(f"session_{label}", API_ID, API_HASH)
-
             await client.connect()
 
             result = await client.send_code_request(phone)
@@ -337,7 +342,6 @@ async def run_bot():
         elif step == "otp":
 
             s = state[uid]
-
             client = s["client"]
 
             try:
@@ -361,21 +365,25 @@ async def run_bot():
                 }
 
                 save_cfg(cfg)
-
                 del state[uid]
 
-                await event.respond("Account Added + Logs Channel Created")
+                asyncio.create_task(
+                    start_dm_listener(
+                        s["label"],
+                        f"session_{s['label']}"
+                    )
+                )
+
+                await event.respond("Account added + logs channel created")
 
             except SessionPasswordNeededError:
 
                 state[uid]["step"] = "2fa"
-
-                await event.respond("Send 2FA Password")
+                await event.respond("Send 2FA password")
 
         elif step == "2fa":
 
             s = state[uid]
-
             client = s["client"]
 
             await client.sign_in(password=event.text)
@@ -393,11 +401,16 @@ async def run_bot():
             }
 
             save_cfg(cfg)
-
             del state[uid]
 
-            await event.respond("Account Added + Logs Channel Created")
+            asyncio.create_task(
+                start_dm_listener(
+                    s["label"],
+                    f"session_{s['label']}"
+                )
+            )
 
+            await event.respond("Account added + logs channel created")
 
     await bot.run_until_disconnected()
 

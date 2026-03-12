@@ -18,10 +18,9 @@ DEFAULT_INTERVAL = 90
 CYCLE_DELAY = 60
 
 state = {}
+clients = {}
 broadcast_task = None
-dm_clients = {}
 
-# ---------- FILE HELPERS ----------
 
 def load_cfg():
     if os.path.exists(CONFIG):
@@ -47,8 +46,6 @@ def save_replied(data):
         json.dump(data, f, indent=2)
 
 
-# ---------- TELEGRAM HELPERS ----------
-
 async def create_logs_channel(client, label):
     result = await client(
         CreateChannelRequest(
@@ -60,42 +57,31 @@ async def create_logs_channel(client, label):
     return result.chats[0].id
 
 
-async def get_groups(client):
-    groups = []
-    async for dialog in client.iter_dialogs():
-        if dialog.is_group:
-            groups.append(dialog)
-    return groups
+async def start_account(label, acc):
 
+    client = TelegramClient(acc["session"], API_ID, API_HASH)
+    await client.start()
 
-# ---------- AUTO DM SYSTEM ----------
-
-async def start_dm_listener(label, session):
+    clients[label] = client
 
     cfg = load_cfg()
     auto_msg = cfg["auto_dm"]
-
-    if not auto_msg:
-        return
 
     replied = load_replied()
 
     if label not in replied:
         replied[label] = []
 
-    client = TelegramClient(session, API_ID, API_HASH)
-    await client.start()
-
-    dm_clients[label] = client
-
     @client.on(events.NewMessage(incoming=True))
-    async def handler(event):
+    async def dm_handler(event):
+
+        if not auto_msg:
+            return
 
         if not event.is_private or event.out:
             return
 
-        sender = await event.get_sender()
-        uid = sender.id
+        uid = event.sender_id
 
         if uid in replied[label]:
             return
@@ -108,84 +94,84 @@ async def start_dm_listener(label, session):
             pass
 
 
-# ---------- BROADCAST SYSTEM ----------
+async def broadcast_cycle():
 
-async def broadcast_account(label, acc, interval):
+    cfg = load_cfg()
+    interval = cfg["interval"]
 
-    client = TelegramClient(acc["session"], API_ID, API_HASH)
-    await client.connect()
+    for label, acc in cfg["accounts"].items():
 
-    msg = await client.get_messages("me", limit=1)
+        if label not in clients:
+            continue
 
-    if not msg:
-        await client.disconnect()
-        return
+        client = clients[label]
 
-    message = msg[0]
-    groups = await get_groups(client)
+        msg = await client.get_messages("me", limit=1)
 
-    success = 0
-    failed = 0
+        if not msg:
+            continue
 
-    for g in groups:
+        message = msg[0]
 
-        try:
+        success = 0
+        failed = 0
 
-            if message.text:
-                await client.send_message(g.id, message.text)
+        async for dialog in client.iter_dialogs():
 
-            elif message.media:
-                await client.send_file(g.id, message.media, caption=message.text)
+            if not dialog.is_group:
+                continue
 
-            success += 1
+            try:
 
-            await client.send_message(
-                acc["log_channel"],
-                f"Sent → {g.name}"
-            )
+                if message.text:
+                    await client.send_message(dialog.id, message.text)
 
-            await asyncio.sleep(random.randint(interval, interval + 30))
+                elif message.media:
+                    await client.send_file(
+                        dialog.id,
+                        message.media,
+                        caption=message.text
+                    )
 
-        except FloodWaitError as e:
+                success += 1
 
-            await client.send_message(
-                acc["log_channel"],
-                f"Flood wait {e.seconds}s"
-            )
+                await client.send_message(
+                    acc["log_channel"],
+                    f"Sent → {dialog.name}"
+                )
 
-            await asyncio.sleep(e.seconds)
+                await asyncio.sleep(random.randint(interval, interval + 30))
 
-        except:
+            except FloodWaitError as e:
 
-            failed += 1
+                await client.send_message(
+                    acc["log_channel"],
+                    f"Flood wait {e.seconds}s"
+                )
 
-            await client.send_message(
-                acc["log_channel"],
-                f"Failed → {g.name}"
-            )
+                await asyncio.sleep(e.seconds)
 
-    await client.send_message(
-        acc["log_channel"],
-        f"Cycle done\nSuccess: {success}\nFailed: {failed}"
-    )
+            except:
 
-    await client.disconnect()
+                failed += 1
+
+                await client.send_message(
+                    acc["log_channel"],
+                    f"Failed → {dialog.name}"
+                )
+
+        await client.send_message(
+            acc["log_channel"],
+            f"Cycle done\nSuccess: {success}\nFailed: {failed}"
+        )
 
 
 async def broadcast_loop():
 
     while True:
-
-        cfg = load_cfg()
-        interval = cfg["interval"]
-
-        for label, acc in cfg["accounts"].items():
-            await broadcast_account(label, acc, interval)
-
+        await broadcast_cycle()
         await asyncio.sleep(CYCLE_DELAY)
 
-
-# ---------- BOT ----------
 
 async def run_bot():
 
@@ -196,9 +182,8 @@ async def run_bot():
 
     cfg = load_cfg()
 
-    # start DM listeners for existing accounts
     for label, acc in cfg["accounts"].items():
-        asyncio.create_task(start_dm_listener(label, acc["session"]))
+        asyncio.create_task(start_account(label, acc))
 
     @bot.on(events.NewMessage(pattern="/start"))
     async def start(event):
@@ -241,12 +226,6 @@ async def run_bot():
             state[uid] = {"step": "phone"}
             await event.respond("Send phone number with country code")
 
-        elif data == "accs":
-            txt = "Accounts\n\n"
-            for l, a in cfg["accounts"].items():
-                txt += a["name"] + "\n"
-            await event.respond(txt)
-
         elif data == "interval":
             state[uid] = {"step": "interval"}
             await event.respond("Send interval seconds")
@@ -261,6 +240,7 @@ async def run_bot():
                 return
 
             broadcast_task = asyncio.create_task(broadcast_loop())
+
             await event.respond("Ads Started")
 
         elif data == "stop":
@@ -368,9 +348,9 @@ async def run_bot():
                 del state[uid]
 
                 asyncio.create_task(
-                    start_dm_listener(
+                    start_account(
                         s["label"],
-                        f"session_{s['label']}"
+                        cfg["accounts"][s["label"]]
                     )
                 )
 
@@ -404,9 +384,9 @@ async def run_bot():
             del state[uid]
 
             asyncio.create_task(
-                start_dm_listener(
+                start_account(
                     s["label"],
-                    f"session_{s['label']}"
+                    cfg["accounts"][s["label"]]
                 )
             )
 

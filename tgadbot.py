@@ -11,13 +11,11 @@ BOT_TOKEN = "8665346412:AAF-QqT8nUot2xeoomXPzGjKt1lGFZni3f8"
 API_ID = 34564865
 API_HASH = "07b94d63a077ddd7a222d64d8362c7b0"
 
-
 CONFIG = "accounts.json"
 DEFAULT_INTERVAL = 90
 CYCLE_DELAY = 60
 
 state = {}
-clients = {}
 broadcast_task = None
 
 
@@ -25,15 +23,24 @@ def load_cfg():
     if os.path.exists(CONFIG):
         with open(CONFIG) as f:
             return json.load(f)
+
     return {"owner": 0, "accounts": {}, "interval": DEFAULT_INTERVAL}
 
 
-def save_cfg(data):
+def save_cfg(c):
     with open(CONFIG, "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump(c, f, indent=2)
+
+
+async def get_dialogs(client):
+    dialogs = []
+    async for dialog in client.iter_dialogs():
+        dialogs.append(dialog)
+    return dialogs
 
 
 async def create_logs_channel(client, label):
+
     result = await client(
         CreateChannelRequest(
             title=f"{label} Logs",
@@ -41,66 +48,93 @@ async def create_logs_channel(client, label):
             megagroup=False
         )
     )
-    return result.chats[0].id
+
+    channel = result.chats[0]
+
+    return channel.id
 
 
-async def start_account(label, acc):
+async def broadcast_account(label, acc, interval):
 
     client = TelegramClient(acc["session"], API_ID, API_HASH)
-    await client.start()
+    await client.connect()
 
-    clients[label] = client
+    msg = await client.get_messages("me", limit=1)
 
-    print("Account connected:", label)
+    if not msg:
+        await client.disconnect()
+        return
 
+    message = msg[0]
 
-async def broadcast_cycle():
+    dialogs = await get_dialogs(client)
 
-    cfg = load_cfg()
-    interval = cfg["interval"]
+    success = 0
+    failed = 0
 
-    for label, acc in cfg["accounts"].items():
+    for g in dialogs:
 
-        if label not in clients:
+        # only groups (no DM, no saved msg)
+        if not g.is_group:
             continue
 
-        client = clients[label]
+        try:
 
-        msg = await client.get_messages("me", limit=1)
+            if message.text:
+                await client.send_message(g.id, message.text)
 
-        if not msg:
-            continue
+            elif message.media:
+                await client.send_file(g.id, message.media, caption=message.text)
 
-        message = msg[0]
+            success += 1
 
-        async for dialog in client.iter_dialogs():
+            await client.send_message(
+                acc["log_channel"],
+                f"Sent → {g.name}"
+            )
 
-            if not dialog.is_group:
-                continue
+            delay = random.randint(interval, interval + 30)
 
-            try:
+            await asyncio.sleep(delay)
 
-                if message.text:
-                    await client.send_message(dialog.id, message.text)
+        except FloodWaitError as e:
 
-                elif message.media:
-                    await client.send_file(dialog.id, message.media, caption=message.text)
+            await client.send_message(
+                acc["log_channel"],
+                f"Flood wait {e.seconds}s"
+            )
 
-                await asyncio.sleep(random.randint(interval, interval + 30))
+            await asyncio.sleep(e.seconds)
 
-            except FloodWaitError as e:
+        except Exception:
 
-                await asyncio.sleep(e.seconds)
+            failed += 1
 
-            except:
-                pass
+            await client.send_message(
+                acc["log_channel"],
+                f"Failed → {g.name}"
+            )
+
+    await client.send_message(
+        acc["log_channel"],
+        f"Cycle done\nSuccess: {success}\nFailed: {failed}"
+    )
+
+    await client.disconnect()
 
 
 async def broadcast_loop():
 
     while True:
 
-        await broadcast_cycle()
+        cfg = load_cfg()
+
+        interval = cfg["interval"]
+
+        accounts = cfg["accounts"]
+
+        for label, acc in accounts.items():
+            await broadcast_account(label, acc, interval)
 
         await asyncio.sleep(CYCLE_DELAY)
 
@@ -110,13 +144,7 @@ async def run_bot():
     global broadcast_task
 
     bot = TelegramClient("bot_session", API_ID, API_HASH)
-
     await bot.start(bot_token=BOT_TOKEN)
-
-    cfg = load_cfg()
-
-    for label, acc in cfg["accounts"].items():
-        asyncio.create_task(start_account(label, acc))
 
     @bot.on(events.NewMessage(pattern="/start"))
     async def start(event):
@@ -131,12 +159,13 @@ async def run_bot():
             return
 
         await event.respond(
-            "Control Panel",
+            "Ads Dashboard",
             buttons=[
                 [Button.inline("Add Account", b"add")],
-                [Button.inline("Accounts", b"accs")],
+                [Button.inline("My Accounts", b"accs")],
                 [Button.inline("Remove Account", b"del")],
-                [Button.inline("Start Ads", b"start"), Button.inline("Stop Ads", b"stop")],
+                [Button.inline("Start Ads", b"start"),
+                 Button.inline("Stop Ads", b"stop")],
                 [Button.inline("Set Interval", b"interval")]
             ],
         )
@@ -148,24 +177,26 @@ async def run_bot():
         global broadcast_task
 
         cfg = load_cfg()
+
         uid = event.sender_id
-        data = event.data.decode()
 
         if uid != cfg["owner"]:
             return
+
+        data = event.data.decode()
 
         if data == "add":
 
             state[uid] = {"step": "phone"}
 
-            await event.respond("Send phone number")
+            await event.respond("Send phone number with country code")
 
         elif data == "accs":
 
             txt = "Accounts\n\n"
 
-            for label, acc in cfg["accounts"].items():
-                txt += acc["name"] + "\n"
+            for l, a in cfg["accounts"].items():
+                txt += a["name"] + "\n"
 
             await event.respond(txt)
 
@@ -173,7 +204,7 @@ async def run_bot():
 
             state[uid] = {"step": "interval"}
 
-            await event.respond("Send interval seconds")
+            await event.respond("Send group interval seconds")
 
         elif data == "start":
 
@@ -182,29 +213,40 @@ async def run_bot():
 
             broadcast_task = asyncio.create_task(broadcast_loop())
 
-            await event.respond("Broadcast started")
+            await event.respond("Ads Started")
 
         elif data == "stop":
 
             if broadcast_task:
                 broadcast_task.cancel()
 
-            await event.respond("Broadcast stopped")
+            await event.respond("Ads Stopped")
 
         elif data == "del":
+
+            if not cfg["accounts"]:
+                await event.respond("No accounts to delete")
+                return
 
             buttons = []
 
             for label, acc in cfg["accounts"].items():
-                buttons.append([Button.inline(acc["name"], f"del_{label}".encode())])
+                buttons.append(
+                    [Button.inline(acc["name"], f"del_{label}".encode())]
+                )
 
-            await event.respond("Select account", buttons=buttons)
+            await event.respond("Select account to remove", buttons=buttons)
 
         elif data.startswith("del_"):
 
             label = data.replace("del_", "")
 
             if label in cfg["accounts"]:
+
+                session_file = f"session_{label}.session"
+
+                if os.path.exists(session_file):
+                    os.remove(session_file)
 
                 del cfg["accounts"][label]
 
@@ -233,14 +275,14 @@ async def run_bot():
 
             del state[uid]
 
-            await event.respond("Interval updated")
+            await event.respond("Interval Updated")
 
 
         elif step == "phone":
 
             phone = event.text.strip()
 
-            label = f"acc{len(cfg['accounts'])+1}"
+            label = f"acc{len(cfg['accounts']) + 1}"
 
             client = TelegramClient(f"session_{label}", API_ID, API_HASH)
 
@@ -287,17 +329,15 @@ async def run_bot():
 
                 save_cfg(cfg)
 
-                asyncio.create_task(start_account(s["label"], cfg["accounts"][s["label"]]))
-
                 del state[uid]
 
-                await event.respond("Account added")
+                await event.respond("Account Added + Logs Channel Created")
 
             except SessionPasswordNeededError:
 
                 state[uid]["step"] = "2fa"
 
-                await event.respond("Send 2FA password")
+                await event.respond("Send 2FA Password")
 
 
         elif step == "2fa":
@@ -322,11 +362,9 @@ async def run_bot():
 
             save_cfg(cfg)
 
-            asyncio.create_task(start_account(s["label"], cfg["accounts"][s["label"]]))
-
             del state[uid]
 
-            await event.respond("Account added")
+            await event.respond("Account Added + Logs Channel Created")
 
 
     await bot.run_until_disconnected()

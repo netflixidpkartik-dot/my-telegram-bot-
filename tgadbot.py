@@ -104,7 +104,7 @@ async def broadcast_loop():
 
             await broadcast_account(label, acc, interval)
 
-        await asyncio.sleep(300)
+        await asyncio.sleep(10)
 
 
 async def run_bot():

@@ -11,7 +11,8 @@ BOT_TOKEN = "8665346412:AAF-QqT8nUot2xeoomXPzGjKt1lGFZni3f8"
 API_ID = 34564865
 API_HASH = "07b94d63a077ddd7a222d64d8362c7b0"
 
-CONFIG = "accounts.json"
+CCONFIG = "accounts.json"
+
 DEFAULT_INTERVAL = 90
 CYCLE_DELAY = 60
 
@@ -27,9 +28,9 @@ def load_cfg():
     return {"owner": 0, "accounts": {}, "interval": DEFAULT_INTERVAL}
 
 
-def save_cfg(c):
+def save_cfg(data):
     with open(CONFIG, "w") as f:
-        json.dump(c, f, indent=2)
+        json.dump(data, f, indent=2)
 
 
 async def create_logs_channel(client, label):
@@ -48,6 +49,7 @@ async def create_logs_channel(client, label):
 async def broadcast_account_loop(label, acc):
 
     client = TelegramClient(acc["session"], API_ID, API_HASH)
+
     await client.start()
 
     print("Account started:", label)
@@ -55,12 +57,15 @@ async def broadcast_account_loop(label, acc):
     while True:
 
         cfg = load_cfg()
+
         interval = cfg["interval"]
 
         msg = await client.get_messages("me", limit=1)
 
         if not msg:
+
             await asyncio.sleep(CYCLE_DELAY)
+
             continue
 
         message = msg[0]
@@ -76,9 +81,11 @@ async def broadcast_account_loop(label, acc):
             try:
 
                 if message.text:
+
                     await client.send_message(dialog.id, message.text)
 
                 elif message.media:
+
                     await client.send_file(
                         dialog.id,
                         message.media,
@@ -148,6 +155,7 @@ async def stop_accounts():
 async def run_bot():
 
     bot = TelegramClient("bot_session", API_ID, API_HASH)
+
     await bot.start(bot_token=BOT_TOKEN)
 
     @bot.on(events.NewMessage(pattern="/start"))
@@ -156,7 +164,9 @@ async def run_bot():
         cfg = load_cfg()
 
         if cfg["owner"] == 0:
+
             cfg["owner"] = event.sender_id
+
             save_cfg(cfg)
 
         if event.sender_id != cfg["owner"]:
@@ -179,6 +189,7 @@ async def run_bot():
     async def callback(event):
 
         cfg = load_cfg()
+
         uid = event.sender_id
 
         if uid != cfg["owner"]:
@@ -221,7 +232,9 @@ async def run_bot():
 
             state[uid] = {"step": "phone"}
 
-            await event.respond("Send phone number")
+            await event.respond(
+                "Send phone with country code\nExample: +919876543210"
+            )
 
 
         elif data == "del":
@@ -229,6 +242,7 @@ async def run_bot():
             buttons = []
 
             for label, acc in cfg["accounts"].items():
+
                 buttons.append(
                     [Button.inline(acc["name"], f"del_{label}".encode())]
                 )
@@ -253,6 +267,7 @@ async def run_bot():
     async def handler(event):
 
         uid = event.sender_id
+
         cfg = load_cfg()
 
         if uid not in state:
@@ -275,13 +290,35 @@ async def run_bot():
 
             phone = event.text.strip()
 
+            if not phone.startswith("+"):
+
+                await event.respond(
+                    "Invalid format\nExample: +919876543210"
+                )
+
+                return
+
             label = f"acc{len(cfg['accounts']) + 1}"
 
-            client = TelegramClient(f"session_{label}", API_ID, API_HASH)
+            client = TelegramClient(
+                f"session_{label}",
+                API_ID,
+                API_HASH
+            )
 
             await client.connect()
 
-            result = await client.send_code_request(phone)
+            try:
+
+                result = await client.send_code_request(phone)
+
+            except FloodWaitError as e:
+
+                await event.respond(
+                    f"Too many OTP requests\nWait {e.seconds//60} minutes"
+                )
+
+                return
 
             state[uid] = {
                 "step": "otp",
@@ -310,7 +347,10 @@ async def run_bot():
 
                 me = await client.get_me()
 
-                log_channel = await create_logs_channel(client, s["label"])
+                log_channel = await create_logs_channel(
+                    client,
+                    s["label"]
+                )
 
                 await client.disconnect()
 
@@ -344,7 +384,10 @@ async def run_bot():
 
             me = await client.get_me()
 
-            log_channel = await create_logs_channel(client, s["label"])
+            log_channel = await create_logs_channel(
+                client,
+                s["label"]
+            )
 
             await client.disconnect()
 

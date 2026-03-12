@@ -10,6 +10,7 @@ from telethon.tl.functions.channels import CreateChannelRequest
 BOT_TOKEN = "8665346412:AAF-QqT8nUot2xeoomXPzGjKt1lGFZni3f8"
 API_ID = 34564865
 API_HASH = "07b94d63a077ddd7a222d64d8362c7b0"
+
 CONFIG = "accounts.json"
 DEFAULT_INTERVAL = 90
 CYCLE_DELAY = 60
@@ -34,26 +35,29 @@ def save_cfg(c):
 async def get_groups(client):
     groups = []
     async for dialog in client.iter_dialogs():
-        if dialog.is_group:
-            groups.append(dialog)
+        groups.append(dialog)
     return groups
 
 
-async def create_logs_group(client, label):
+async def create_logs_channel(client, label):
+
     result = await client(
         CreateChannelRequest(
             title=f"{label} Logs",
-            about="Auto logs",
-            megagroup=True,
+            about="Account logs",
+            megagroup=False
         )
     )
+
     channel = result.chats[0]
+
     return channel.id
 
 
 async def broadcast_account(label, acc, interval):
 
     client = TelegramClient(acc["session"], API_ID, API_HASH)
+
     await client.connect()
 
     msg = await client.get_messages("me", limit=1)
@@ -63,14 +67,15 @@ async def broadcast_account(label, acc, interval):
         return
 
     message = msg[0]
-    groups = await get_groups(client)
+
+    dialogs = await get_groups(client)
 
     success = 0
     failed = 0
 
-    for g in groups:
+    for g in dialogs:
 
-        if abs(g.id) == abs(acc["log_channel"]):
+        if g.is_channel and not g.entity.megagroup:
             continue
 
         try:
@@ -123,10 +128,13 @@ async def broadcast_loop():
     while True:
 
         cfg = load_cfg()
+
         interval = cfg["interval"]
+
         accounts = cfg["accounts"]
 
         for label, acc in accounts.items():
+
             await broadcast_account(label, acc, interval)
 
         await asyncio.sleep(CYCLE_DELAY)
@@ -137,6 +145,7 @@ async def run_bot():
     global broadcast_task
 
     bot = TelegramClient("bot_session", API_ID, API_HASH)
+
     await bot.start(bot_token=BOT_TOKEN)
 
     @bot.on(events.NewMessage(pattern="/start"))
@@ -159,7 +168,7 @@ async def run_bot():
                 [Button.inline("Remove Account", b"del")],
                 [Button.inline("Start Ads", b"start"),
                  Button.inline("Stop Ads", b"stop")],
-                [Button.inline("Set Interval", b"interval")],
+                [Button.inline("Set Interval", b"interval")]
             ],
         )
 
@@ -170,6 +179,7 @@ async def run_bot():
         global broadcast_task
 
         cfg = load_cfg()
+
         uid = event.sender_id
 
         if uid != cfg["owner"]:
@@ -180,11 +190,13 @@ async def run_bot():
         if data == "add":
 
             state[uid] = {"step": "phone"}
+
             await event.respond("Send phone number with country code")
 
         elif data == "accs":
 
             txt = "Accounts\n\n"
+
             for l, a in cfg["accounts"].items():
                 txt += a["name"] + "\n"
 
@@ -193,6 +205,7 @@ async def run_bot():
         elif data == "interval":
 
             state[uid] = {"step": "interval"}
+
             await event.respond("Send group interval seconds")
 
         elif data == "start":
@@ -201,6 +214,7 @@ async def run_bot():
                 return
 
             broadcast_task = asyncio.create_task(broadcast_loop())
+
             await event.respond("Ads Started")
 
         elif data == "stop":
@@ -247,6 +261,7 @@ async def run_bot():
     async def handler(event):
 
         uid = event.sender_id
+
         cfg = load_cfg()
 
         if uid not in state:
@@ -257,18 +272,22 @@ async def run_bot():
         if step == "interval":
 
             cfg["interval"] = int(event.text)
+
             save_cfg(cfg)
 
             del state[uid]
 
             await event.respond("Interval Updated")
 
+
         elif step == "phone":
 
             phone = event.text.strip()
+
             label = f"acc{len(cfg['accounts']) + 1}"
 
             client = TelegramClient(f"session_{label}", API_ID, API_HASH)
+
             await client.connect()
 
             result = await client.send_code_request(phone)
@@ -278,14 +297,16 @@ async def run_bot():
                 "client": client,
                 "phone": phone,
                 "hash": result.phone_code_hash,
-                "label": label,
+                "label": label
             }
 
             await event.respond("Send OTP")
 
+
         elif step == "otp":
 
             s = state[uid]
+
             client = s["client"]
 
             try:
@@ -298,23 +319,21 @@ async def run_bot():
 
                 me = await client.get_me()
 
-                log_channel = await create_logs_group(client, s["label"])
+                log_channel = await create_logs_channel(client, s["label"])
 
                 await client.disconnect()
 
                 cfg["accounts"][s["label"]] = {
                     "session": f"session_{s['label']}",
                     "name": me.first_name,
-                    "log_channel": log_channel,
+                    "log_channel": log_channel
                 }
 
                 save_cfg(cfg)
 
                 del state[uid]
 
-                await event.respond(
-                    "Account Added + Logs Group Created"
-                )
+                await event.respond("Account Added + Logs Channel Created")
 
             except SessionPasswordNeededError:
 
@@ -322,32 +341,32 @@ async def run_bot():
 
                 await event.respond("Send 2FA Password")
 
+
         elif step == "2fa":
 
             s = state[uid]
+
             client = s["client"]
 
             await client.sign_in(password=event.text)
 
             me = await client.get_me()
 
-            log_channel = await create_logs_group(client, s["label"])
+            log_channel = await create_logs_channel(client, s["label"])
 
             await client.disconnect()
 
             cfg["accounts"][s["label"]] = {
                 "session": f"session_{s['label']}",
                 "name": me.first_name,
-                "log_channel": log_channel,
+                "log_channel": log_channel
             }
 
             save_cfg(cfg)
 
             del state[uid]
 
-            await event.respond(
-                "Account Added + Logs Group Created"
-            )
+            await event.respond("Account Added + Logs Channel Created")
 
 
     await bot.run_until_disconnected()

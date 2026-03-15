@@ -12,6 +12,7 @@ from telethon.errors import (
 )
 from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.functions.messages import ExportChatInviteRequest
+import time
 
 # ══════════════════════════════════════════════
 #  CREDENTIALS
@@ -21,7 +22,7 @@ BOT_TOKEN = "8639594670:AAESsjZn3OgDzVkde6juVD8OOwk2RhdJ3us"
 API_ID    = 30298985
 API_HASH  = "0e632624d1551bc099a2ed8563962717"
 
-OWNER_ID  = 0   # 👈 APNI TELEGRAM ID YAHAN DAALO — e.g. 123456789
+OWNER_ID  = 6965061227   # 👈 APNI TELEGRAM ID YAHAN DAALO — e.g. 123456789
 
 # ══════════════════════════════════════════════
 #  CONSTANTS
@@ -576,6 +577,9 @@ async def run_bot():
     @bot.on(events.NewMessage(func=lambda e: e.is_private))
     async def on_msg(event):
         uid = event.sender_id
+        # Commands ignore karo — unke apne handlers hain
+        if event.raw_text.startswith("/"):
+            return
         if uid not in user_state:
             return
 
@@ -629,7 +633,6 @@ async def run_bot():
             if not text.startswith("+"):
                 await event.respond("⚠️ Format: `+919876543210`")
                 return
-            import time
             label  = f"acc_{uid}_{int(time.time())}"
             client = TelegramClient(f"session_{label}", API_ID, API_HASH)
             try:

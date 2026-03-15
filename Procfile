@@ -1,2 +1,2 @@
-worker: python tgadbot.py
-worker: python cc.py
+worker: python main.py
+

@@ -7,6 +7,7 @@
 ╚══════════════════════════════════════════════════╝
 """
 
+import asyncio
 import sqlite3
 import random
 import logging
@@ -26,13 +27,12 @@ from telegram.ext import (
 BOT_TOKEN = "8624189770:AAGvFomH-7Lvc-HCQCfSQ5U8Dsuy4fCTtUg"
 
 WALLETS = {
-    "usdt_bep20": ("💵 USDT BEP-20 (BSC)",       "0xcF0ABcDF3afccBE577d4D930e01af5c7F50f5aB7"),
-    "usdt_eth":   ("🔷 USDT Ethereum (ERC-20)",   "0xcF0ABcDF3afccBE577d4D930e01af5c7F50f5aB7"),
-    "btc":        ("₿ Bitcoin (BTC)",             "bc1q0gtel9l8sczkrlv3ywdqkk9adln8f84zw0wczr"),
-    "ltc":        ("🥈 Litecoin (LTC)",            "ltc1qj3f4rdevg738hrnf0xpdvlkc9k98u3ahkfykrj"),
-    "ton":        ("💎 TON",                       "UQCAoTZkL0N_gxjDnV1-PC1rgqdPgfGDhtJs-YU2yHbkeZy-"),
-    "usdt_sol":   ("🟣 USDT SPL (Solana)",         "CLiBT9JuTJCjpBkf4HXZMCimkzxJKX8PJxJtxHTd6iFe"),
-    "bnb":        ("🟡 BNB Coin (BSC)",            "0xcF0ABcDF3afccBE577d4D930e01af5c7F50f5aB7"),
+    "usdt_bep20": ("💵 USDT BEP-20 (BSC)",  "YOUR_BSC_USDT_WALLET_ADDRESS"),
+    "usdt_trc20": ("🟢 USDT TRC-20 (TRON)", "YOUR_TRC20_USDT_WALLET_ADDRESS"),
+    "trx":        ("🔴 TRON (TRX)",          "YOUR_TRX_WALLET_ADDRESS"),
+    "btc":        ("₿ Bitcoin (BTC)",        "YOUR_BTC_WALLET_ADDRESS"),
+    "ltc":        ("🥈 Litecoin (LTC)",      "YOUR_LTC_WALLET_ADDRESS"),
+    "ton":        ("💎 TON",                 "YOUR_TON_WALLET_ADDRESS"),
 }
 
 ADMIN_IDS = []  # e.g. [123456789]
@@ -434,9 +434,10 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "👥 50,000+ satisfied cardholders\n"
             "🔒 256-bit SSL Encrypted\n"
             "⚡ Instant delivery\n"
-            "₿  7 Crypto payment networks\n"
+            "₿  6 Crypto payment networks\n"
             "🌍 180+ countries served\n"
             "📊 99.98% uptime SLA\n\n"
+            "📞 Support: @4xCardSupport\n\n"
             "<i>© 2025 4xCardsShop</i>",
             parse_mode=HTML, reply_markup=kb_back_main())
 
@@ -559,13 +560,9 @@ async def _show_checkout(q, user_id):
 #  🚀  MAIN
 # ══════════════════════════════════════════════════════
 
-def main():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("ERROR: BOT_TOKEN set nahi hai!")
-        return
-
+async def run_cc():
     init_db()
-    logger.info("Database initialized")
+    logger.info("4xCardsShop: Database initialized")
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",  cmd_start))
@@ -576,9 +573,14 @@ def main():
     app.add_handler(CallbackQueryHandler(on_callback))
 
     logger.info("4xCardsShop Bot started")
-    print("Bot chal raha hai... (Ctrl+C se band karo)")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    print("cc.py (4xCardsShop) chal raha hai...")
+
+    async with app:
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(run_cc())

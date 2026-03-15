@@ -21,6 +21,8 @@ BOT_TOKEN = "8639594670:AAESsjZn3OgDzVkde6juVD8OOwk2RhdJ3us"
 API_ID    = 30298985
 API_HASH  = "0e632624d1551bc099a2ed8563962717"
 
+OWNER_ID  = 0   # 👈 APNI TELEGRAM ID YAHAN DAALO — e.g. 123456789
+
 # ══════════════════════════════════════════════
 #  CONSTANTS
 # ══════════════════════════════════════════════
@@ -261,11 +263,17 @@ async def run_bot():
         cfg = load_cfg()
         uid = event.sender_id
 
-        # Set owner on first run
-        if cfg["owner"] == 0:
-            cfg["owner"] = uid
-            save_cfg(cfg)
-            cfg = load_cfg()
+        # OWNER_ID hardcoded hone par use karo, warna first-run wala logic
+        if OWNER_ID != 0:
+            if cfg["owner"] != OWNER_ID:
+                cfg["owner"] = OWNER_ID
+                save_cfg(cfg)
+                cfg = load_cfg()
+        else:
+            if cfg["owner"] == 0:
+                cfg["owner"] = uid
+                save_cfg(cfg)
+                cfg = load_cfg()
 
         if not is_auth(uid):
             await event.respond(

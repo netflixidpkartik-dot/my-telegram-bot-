@@ -27,12 +27,13 @@ from telegram.ext import (
 BOT_TOKEN = "8624189770:AAGvFomH-7Lvc-HCQCfSQ5U8Dsuy4fCTtUg"
 
 WALLETS = {
-    "usdt_bep20": ("💵 USDT BEP-20 (BSC)",  "YOUR_BSC_USDT_WALLET_ADDRESS"),
-    "usdt_trc20": ("🟢 USDT TRC-20 (TRON)", "YOUR_TRC20_USDT_WALLET_ADDRESS"),
-    "trx":        ("🔴 TRON (TRX)",          "YOUR_TRX_WALLET_ADDRESS"),
-    "btc":        ("₿ Bitcoin (BTC)",        "YOUR_BTC_WALLET_ADDRESS"),
-    "ltc":        ("🥈 Litecoin (LTC)",      "YOUR_LTC_WALLET_ADDRESS"),
-    "ton":        ("💎 TON",                 "YOUR_TON_WALLET_ADDRESS"),
+    "usdt_bep20": ("💵 USDT BEP-20 (BSC)",      "0xcF0ABcDF3afccBE577d4D930e01af5c7F50f5aB7"),
+    "usdt_eth":   ("🔷 USDT Ethereum (ERC-20)", "0xcF0ABcDF3afccBE577d4D930e01af5c7F50f5aB7"),
+    "btc":        ("₿ Bitcoin (BTC)",           "bc1q0gtel9l8sczkrlv3ywdqkk9adln8f84zw0wczr"),
+    "ltc":        ("🥈 Litecoin (LTC)",         "ltc1qj3f4rdevg738hrnf0xpdvlkc9k98u3ahkfykrj"),
+    "ton":        ("💎 TON",                    "UQCAoTZkL0N_gxjDnV1-PC1rgqdPgfGDhtJs-YU2yHbkeZy-"),
+    "usdt_sol":   ("🟣 USDT SPL (Solana)",      "CLiBT9JuTJCjpBkf4HXZMCimkzxJKX8PJxJtxHTd6iFe"),
+    "bnb":        ("🟡 BNB Coin (BSC)",         "0xcF0ABcDF3afccBE577d4D930e01af5c7F50f5aB7"),
 }
 
 ADMIN_IDS = []  # e.g. [123456789]

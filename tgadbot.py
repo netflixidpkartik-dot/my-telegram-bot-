@@ -13,35 +13,44 @@ from telethon.errors import (
 from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.functions.messages import ExportChatInviteRequest
 
-# ─────────────────────────────────────────
-#  Config
-# ─────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  CREDENTIALS
+# ══════════════════════════════════════════════
 
 BOT_TOKEN = "8639594670:AAESsjZn3OgDzVkde6juVD8OOwk2RhdJ3us"
 API_ID    = 30298985
 API_HASH  = "0e632624d1551bc099a2ed8563962717"
 
+# ══════════════════════════════════════════════
+#  CONSTANTS
+# ══════════════════════════════════════════════
+
 CONFIG           = "accounts.json"
 DEFAULT_INTERVAL = 90
 CYCLE_DELAY      = 60
 
-# ─────────────────────────────────────────
-#  In-memory state
-# ─────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  GLOBAL STATE
+# ══════════════════════════════════════════════
 
-state         = {}   # uid → step data
+user_state    = {}   # uid  → {"step": ..., ...}
 account_tasks = {}   # label → asyncio.Task
-clients       = {}   # session_path → TelegramClient  (global pool)
+client_pool   = {}   # session_path → TelegramClient
 
-# ─────────────────────────────────────────
-#  Config helpers
-# ─────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  CONFIG HELPERS
+# ══════════════════════════════════════════════
 
 def load_cfg() -> dict:
     if os.path.exists(CONFIG):
         with open(CONFIG) as f:
             return json.load(f)
-    return {"owner": 0, "interval": DEFAULT_INTERVAL, "users": {}, "accounts": {}}
+    return {
+        "owner":    0,
+        "interval": DEFAULT_INTERVAL,
+        "users":    {},
+        "accounts": {}
+    }
 
 
 def save_cfg(data: dict):
@@ -49,16 +58,16 @@ def save_cfg(data: dict):
         json.dump(data, f, indent=2)
 
 
-def is_authorised(uid: int) -> bool:
+def is_auth(uid: int) -> bool:
     cfg = load_cfg()
-    return uid == cfg["owner"] or str(uid) in cfg.get("users", {})
+    return uid == cfg["owner"] or str(uid) in cfg["users"]
 
 
 def is_owner(uid: int) -> bool:
     return uid == load_cfg()["owner"]
 
 
-def can_add_account(uid: int) -> bool:
+def account_limit_ok(uid: int) -> bool:
     cfg = load_cfg()
     if uid == cfg["owner"]:
         return True
@@ -68,386 +77,355 @@ def can_add_account(uid: int) -> bool:
     used = sum(1 for a in cfg["accounts"].values() if a.get("owner") == uid)
     return used < u["limit"]
 
-
-# ─────────────────────────────────────────
-#  Global client manager  ← KEY FIX
-#  One TelegramClient per session file.
-#  Both broadcast and groups-fetch share
-#  the same instance → no SQLite lock.
-# ─────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  CLIENT POOL
+#  ONE client per session → no SQLite lock
+# ══════════════════════════════════════════════
 
 async def get_client(session: str) -> TelegramClient:
-    """Return existing client or create + authenticate a new one."""
-    if session in clients:
-        c = clients[session]
-        if c.is_connected():
-            return c
-        await c.connect()
+    if session in client_pool:
+        c = client_pool[session]
+        if not c.is_connected():
+            await c.connect()
         return c
-
     c = TelegramClient(session, API_ID, API_HASH)
     await c.start()
-    clients[session] = c
+    client_pool[session] = c
     return c
 
 
-async def release_client(session: str):
-    """Disconnect and remove a client from the pool."""
-    c = clients.pop(session, None)
+async def drop_client(session: str):
+    c = client_pool.pop(session, None)
     if c:
         try:
             await c.disconnect()
         except Exception:
             pass
 
-
-# ─────────────────────────────────────────
-#  Log channel
-# ─────────────────────────────────────────
-
-async def create_logs_channel(client: TelegramClient, name: str) -> int:
-    result = await client(
-        CreateChannelRequest(
-            title=f"{name} Logs",
-            about="Account activity logs",
-            megagroup=False,
-        )
-    )
-    return result.chats[0].id
-
-
-async def send_log(client: TelegramClient, log_channel, text: str):
-    if not log_channel:
-        return
-    try:
-        await client.send_message(log_channel, text)
-    except Exception:
-        pass
-
-
-# ─────────────────────────────────────────
-#  Broadcast engine
-# ─────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  BROADCAST ENGINE
+# ══════════════════════════════════════════════
 
 async def broadcast_loop(label: str):
-    """
-    Runs forever for one account.
-    Uses the global client pool — no duplicate sessions — no DB lock.
-    Pre-loads dialogs before sending — stable loop.
-    """
     cfg = load_cfg()
     acc = cfg["accounts"].get(label)
     if not acc:
         return
 
-    session     = acc["session"]
-    log_channel = acc.get("logs")
-
     try:
-        client = await get_client(session)
+        client = await get_client(acc["session"])
     except Exception as e:
-        print(f"[{label}] Could not start client: {e}")
+        print(f"[{label}] start failed: {e}")
         return
 
+    log_ch = acc.get("logs")
+
+    async def log(txt):
+        if not log_ch:
+            return
+        try:
+            await client.send_message(log_ch, txt)
+        except Exception:
+            pass
+
     while True:
-        cfg      = load_cfg()
-        interval = cfg.get("interval", DEFAULT_INTERVAL)
-        acc      = cfg["accounts"].get(label)
-        if not acc:
-            break
-
-        # --- fetch saved message ---
         try:
+            cfg      = load_cfg()
+            interval = cfg.get("interval", DEFAULT_INTERVAL)
+            acc      = cfg["accounts"].get(label)
+            if not acc:
+                break
+
+            # 1. Get saved message
             msgs = await client.get_messages("me", limit=1)
-        except Exception as e:
-            await send_log(client, log_channel, f"warning get_messages error: {e}")
-            await asyncio.sleep(10)
-            continue
+            if not msgs:
+                await asyncio.sleep(CYCLE_DELAY)
+                continue
 
-        if not msgs:
+            msg = msgs[0]
+
+            # 2. Preload all groups
+            dialogs = []
+            async for d in client.iter_dialogs():
+                if d.is_group:
+                    dialogs.append(d)
+
+            # 3. Send to each group
+            for d in dialogs:
+                try:
+                    if msg.media:
+                        await client.send_file(d.id, msg.media, caption=msg.text or "")
+                    elif msg.text:
+                        await client.send_message(d.id, msg.text)
+                    await log(f"Sent → {d.name}")
+                    await asyncio.sleep(random.randint(interval, interval + 30))
+
+                except FloodWaitError as e:
+                    await log(f"FloodWait {e.seconds}s — waiting")
+                    await asyncio.sleep(e.seconds)
+
+                except asyncio.CancelledError:
+                    return
+
+                except Exception as e:
+                    await log(f"Error [{d.name}]: {e}")
+
             await asyncio.sleep(CYCLE_DELAY)
-            continue
 
-        message = msgs[0]
+        except asyncio.CancelledError:
+            return
 
-        # --- preload dialogs ---
-        try:
-            dialogs = [d async for d in client.iter_dialogs() if d.is_group]
         except Exception as e:
-            await send_log(client, log_channel, f"warning iter_dialogs error: {e}")
-            await asyncio.sleep(CYCLE_DELAY)
-            continue
-
-        # --- send to each group ---
-        for dialog in dialogs:
-            try:
-                if message.media:
-                    await client.send_file(
-                        dialog.id, message.media, caption=message.text or ""
-                    )
-                elif message.text:
-                    await client.send_message(dialog.id, message.text)
-
-                await send_log(client, log_channel, f"Sent to {dialog.name}")
-                await asyncio.sleep(random.randint(interval, interval + 30))
-
-            except FloodWaitError as e:
-                await send_log(client, log_channel, f"FloodWait {e.seconds}s")
-                await asyncio.sleep(e.seconds)
-
-            except asyncio.CancelledError:
-                return
-
-            except Exception as e:
-                await send_log(client, log_channel, f"Error {dialog.name}: {e}")
-
-        await asyncio.sleep(CYCLE_DELAY)
+            print(f"[{label}] loop error: {e}")
+            await asyncio.sleep(15)
 
 
-async def start_all_accounts():
-    cfg = load_cfg()
-    for label in cfg["accounts"]:
-        if label not in account_tasks:
-            t = asyncio.create_task(broadcast_loop(label))
-            account_tasks[label] = t
-
-
-async def stop_all_accounts():
-    for t in account_tasks.values():
-        t.cancel()
-    account_tasks.clear()
-
-
-def start_one(label: str):
+def task_start(label: str):
     if label not in account_tasks:
-        t = asyncio.create_task(broadcast_loop(label))
-        account_tasks[label] = t
+        account_tasks[label] = asyncio.create_task(broadcast_loop(label))
 
 
-def stop_one(label: str):
+def task_stop(label: str):
     t = account_tasks.pop(label, None)
     if t:
         t.cancel()
 
+# ══════════════════════════════════════════════
+#  PANEL HELPERS
+# ══════════════════════════════════════════════
 
-# ─────────────────────────────────────────
-#  Panel builders
-# ─────────────────────────────────────────
-
-async def send_owner_panel(target, cfg: dict):
+async def owner_panel(event, cfg: dict):
     total   = len(cfg["accounts"])
-    running = len(account_tasks)
-    subs    = len(cfg.get("users", {}))
-    text = (
-        "👑 **OWNER PANEL**\n\n"
-        f"📱 Accounts   : `{total}`\n"
-        f"🟢 Running    : `{running}`\n"
-        f"👥 Subscribers: `{subs}`\n"
-        f"⏱ Interval   : `{cfg['interval']} sec`"
+    running = sum(1 for l in cfg["accounts"] if l in account_tasks)
+    subs    = len(cfg["users"])
+    await event.respond(
+        f"👑 **OWNER PANEL**\n\n"
+        f"📱 Accounts    : `{total}`\n"
+        f"🟢 Running     : `{running}`\n"
+        f"👥 Subscribers : `{subs}`\n"
+        f"⏱ Interval    : `{cfg['interval']} sec`",
+        buttons=[
+            [Button.inline("📂 Accounts",          b"accs"),
+             Button.inline("➕ Add Account",        b"add")],
+            [Button.inline("👥 Subscribers",        b"subs"),
+             Button.inline("➕ Add Sub",            b"add_sub")],
+            [Button.inline("❌ Remove Account",     b"del"),
+             Button.inline("🗑 Remove Sub",         b"del_sub")],
+            [Button.inline("🚀 Start Ads",          b"start"),
+             Button.inline("⛔ Stop Ads",           b"stop")],
+            [Button.inline("⏱ Interval",            b"interval")],
+            [Button.inline("📡 Subscriber Groups",  b"subgroups")],
+        ]
     )
-    buttons = [
-        [Button.inline("📂 Accounts",          b"accs"),
-         Button.inline("➕ Add Account",       b"add")],
-        [Button.inline("👥 Subscribers",       b"subs"),
-         Button.inline("➕ Add Sub",           b"add_sub")],
-        [Button.inline("❌ Remove Account",    b"del"),
-         Button.inline("🗑 Remove Sub",        b"del_sub")],
-        [Button.inline("🚀 Start Ads",         b"start"),
-         Button.inline("⛔ Stop Ads",          b"stop")],
-        [Button.inline("⏱ Interval",           b"interval")],
-        [Button.inline("📡 Subscriber Groups", b"subgroups")],
-    ]
-    await target.respond(text, buttons=buttons)
 
 
-async def send_sub_panel(target, uid: int, cfg: dict):
-    u_data     = cfg["users"][str(uid)]
-    limit      = u_data["limit"]
-    name       = u_data.get("username", "User")
-    my_accs    = [l for l, a in cfg["accounts"].items() if a.get("owner") == uid]
-    used       = len(my_accs)
-    running    = sum(1 for l in my_accs if l in account_tasks)
-    stopped    = used - running
-    slots_left = limit - used
-    bar        = "🟢" * running + "🔴" * stopped + "⚫" * slots_left
-
-    text = (
-        "🚀 **Dustin Adbot Dashboard**\n\n"
-        f"📱 Accounts Used : `{used}/{limit}`\n"
-        f"🟢 Running       : `{running}`\n"
-        f"🔴 Stopped       : `{stopped}`\n"
-        f"⏱ Interval      : `{cfg['interval']} sec`\n\n"
-        f"{bar}"
+async def sub_panel(event, uid: int, cfg: dict):
+    u       = cfg["users"][str(uid)]
+    limit   = u["limit"]
+    my      = [l for l, a in cfg["accounts"].items() if a.get("owner") == uid]
+    used    = len(my)
+    running = sum(1 for l in my if l in account_tasks)
+    stopped = used - running
+    left    = limit - used
+    bar     = "🟢" * running + "🔴" * stopped + "⚫" * left
+    await event.respond(
+        f"🚀 **Dustin Adbot**\n\n"
+        f"📱 Accounts : `{used}/{limit}`\n"
+        f"🟢 Running  : `{running}`\n"
+        f"🔴 Stopped  : `{stopped}`\n"
+        f"⏱ Interval : `{cfg['interval']} sec`\n\n"
+        f"{bar}",
+        buttons=[
+            [Button.inline("➕ Add Account",     b"add"),
+             Button.inline("📂 My Accounts",     b"accs")],
+            [Button.inline("🗑️ Remove Account",  b"del")],
+            [Button.inline("🚀 Start Ads",        b"start"),
+             Button.inline("⛔ Stop Ads",         b"stop")],
+            [Button.inline("⏱️ Set Interval",     b"interval")],
+        ]
     )
-    buttons = [
-        [Button.inline("➕ Add Account",     b"add"),
-         Button.inline("📂 My Accounts",    b"accs")],
-        [Button.inline("🗑️ Remove Account", b"del")],
-        [Button.inline("🚀 Start Ads",       b"start"),
-         Button.inline("⛔ Stop Ads",        b"stop")],
-        [Button.inline("⏱️ Set Interval",    b"interval")],
-    ]
-    await target.respond(text, buttons=buttons)
 
-
-# ─────────────────────────────────────────
-#  Bot
-# ─────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  BOT
+# ══════════════════════════════════════════════
 
 async def run_bot():
-    bot = TelegramClient("control_panel_bot", API_ID, API_HASH)
+    bot = TelegramClient("bot_session", API_ID, API_HASH)
     await bot.start(bot_token=BOT_TOKEN)
 
-    # ════════════════════════════════════════
+    # ─────────────────────────────────────────
     #  /start
-    # ════════════════════════════════════════
+    # ─────────────────────────────────────────
     @bot.on(events.NewMessage(pattern="/start"))
     async def cmd_start(event):
         cfg = load_cfg()
         uid = event.sender_id
 
+        # Set owner on first run
         if cfg["owner"] == 0:
             cfg["owner"] = uid
             save_cfg(cfg)
+            cfg = load_cfg()
 
-        cfg = load_cfg()
-
-        if not is_authorised(uid):
+        if not is_auth(uid):
             await event.respond(
-                "🚫 **Access Denied**\n\n"
-                "You are not authorised to use this bot.\n\n"
-                "Contact the owner to purchase a subscription."
+                "╔══════════════════════╗\n"
+                "      🚫 ACCESS DENIED 🚫\n"
+                "╚══════════════════════╝\n\n"
+                "😔 **You are not authorised to use this bot.**\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "🚀 **What is DUSTIN ADBOT?**\n\n"
+                "   🤖 Auto-broadcast messages to all your Telegram groups\n"
+                "   📱 Connect multiple Telegram accounts\n"
+                "   ⚡ Smart interval-based sending (no spam ban)\n"
+                "   🔁 Runs 24/7 in the background automatically\n"
+                "   📊 Live logs for every account activity\n"
+                "   🛡️ Flood-wait protection built-in\n"
+                "   🖼️ Supports text & media messages\n"
+                "   ⚙️ Full control via Telegram bot panel\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📋 **To get access:**\n\n"
+                "   🔹 Contact the Owner\n"
+                "   🔹 Purchase a Subscription\n"
+                "   🔹 Come back & type /start\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "💎 **DUSTIN ADBOT** — Premium Only\n\n"
+                "🙏 Thank You for visiting!\n"
+                "⭐ See you after purchasing your subscription."
             )
             return
 
         if is_owner(uid):
-            await send_owner_panel(event, cfg)
+            await owner_panel(event, cfg)
         else:
-            await send_sub_panel(event, uid, cfg)
+            await sub_panel(event, uid, cfg)
 
-    # ════════════════════════════════════════
+    # ─────────────────────────────────────────
     #  Callbacks
-    # ════════════════════════════════════════
+    # ─────────────────────────────────────────
     @bot.on(events.CallbackQuery)
-    async def on_callback(event):
-        cfg  = load_cfg()
+    async def on_cb(event):
         uid  = event.sender_id
         data = event.data.decode()
 
-        if not is_authorised(uid):
-            await event.answer("Access denied", alert=True)
+        if not is_auth(uid):
+            await event.answer("Access denied.", alert=True)
             return
 
+        cfg   = load_cfg()
         owner = is_owner(uid)
 
-        # ── Start / Stop ─────────────────────
+        # ── Start Ads ────────────────────────
         if data == "start":
             if owner:
-                await start_all_accounts()
-                await event.answer("All ads started")
+                for label in cfg["accounts"]:
+                    task_start(label)
+                await event.answer("All ads started.")
             else:
                 for label, acc in cfg["accounts"].items():
                     if acc.get("owner") == uid:
-                        start_one(label)
-                await event.answer("Your ads started")
+                        task_start(label)
+                await event.answer("Your ads started.")
 
+        # ── Stop Ads ─────────────────────────
         elif data == "stop":
             if owner:
-                await stop_all_accounts()
-                await event.answer("All ads stopped")
+                for label in list(account_tasks.keys()):
+                    task_stop(label)
+                await event.answer("All ads stopped.")
             else:
                 for label, acc in cfg["accounts"].items():
                     if acc.get("owner") == uid:
-                        stop_one(label)
-                await event.answer("Your ads stopped")
+                        task_stop(label)
+                await event.answer("Your ads stopped.")
 
-        # ── Interval ─────────────────────────
+        # ── Set Interval ─────────────────────
         elif data == "interval":
-            state[uid] = {"step": "interval"}
-            await event.respond("Enter new interval in seconds (e.g. `90`):")
+            user_state[uid] = {"step": "interval"}
+            await event.respond("⏱ Send new interval in seconds:\nExample: `90`")
 
-        # ── Accounts list ─────────────────────
+        # ── View Accounts ─────────────────────
         elif data == "accs":
-            txt   = "📂 **Connected Accounts**\n\n"
-            found = False
+            lines = []
             for label, acc in cfg["accounts"].items():
                 if owner or acc.get("owner") == uid:
-                    icon     = "🟢" if label in account_tasks else "🔴"
-                    owner_id = acc.get("owner", "?")
-                    extra    = f" _(sub: `{owner_id}`)_" if owner and owner_id != uid else ""
-                    txt     += f"{icon} **{acc['name']}**{extra}\n"
-                    found    = True
-            if not found:
-                txt += "_No accounts connected._"
+                    icon = "🟢" if label in account_tasks else "🔴"
+                    lines.append(f"{icon} **{acc['name']}**")
+            txt = "📂 **Accounts**\n\n" + ("\n".join(lines) if lines else "_None._")
             await event.respond(txt)
 
-        # ── Add account ───────────────────────
+        # ── Add Account ──────────────────────
         elif data == "add":
-            if not can_add_account(uid):
-                await event.respond("Account limit reached. Contact owner.")
+            if not account_limit_ok(uid):
+                await event.respond("⚠️ Account limit reached. Contact owner.")
                 return
-            state[uid] = {"step": "phone"}
-            await event.respond("Send phone number:\nExample: `+919876543210`")
+            user_state[uid] = {"step": "phone"}
+            await event.respond("📱 Send phone number:\nExample: `+919876543210`")
 
-        # ── Remove account ────────────────────
+        # ── Remove Account — list ─────────────
         elif data == "del":
-            buttons = [
-                [Button.inline(f"Remove {acc['name']}", f"delacc_{label}".encode())]
-                for label, acc in cfg["accounts"].items()
-                if owner or acc.get("owner") == uid
-            ]
+            buttons = []
+            for label, acc in cfg["accounts"].items():
+                if owner or acc.get("owner") == uid:
+                    buttons.append([
+                        Button.inline(f"🗑 {acc['name']}", f"del_{label}".encode())
+                    ])
             if not buttons:
                 await event.respond("No accounts found.")
                 return
             await event.respond("Select account to remove:", buttons=buttons)
 
-        elif data.startswith("delacc_"):
-            label    = data[len("delacc_"):]
-            acc      = cfg["accounts"].get(label, {})
-            acc_name = acc.get("name", label)
-            if not owner and acc.get("owner") != uid:
-                await event.answer("Not your account", alert=True)
+        # ── Remove Account — confirm ──────────
+        elif data.startswith("del_") and not data.startswith("del_sub"):
+            label = data[4:]
+            acc   = cfg["accounts"].get(label)
+            if not acc:
+                await event.respond("Account not found.")
                 return
-            cfg["accounts"].pop(label, None)
+            if not owner and acc.get("owner") != uid:
+                await event.answer("Not your account.", alert=True)
+                return
+            name = acc["name"]
+            cfg["accounts"].pop(label)
             save_cfg(cfg)
-            stop_one(label)
-            await release_client(acc.get("session", ""))
-            await event.respond(f"Account **{acc_name}** removed.")
+            task_stop(label)
+            await drop_client(acc.get("session", ""))
+            await event.respond(f"✅ **{name}** removed.")
 
-        # ── Subscribers list ──────────────────
+        # ── Subscribers List ──────────────────
         elif data == "subs":
             if not owner:
-                await event.answer("Owner only", alert=True)
+                await event.answer("Owner only.", alert=True)
                 return
-            users = cfg.get("users", {})
+            users = cfg["users"]
             if not users:
                 await event.respond("No subscribers yet.")
                 return
-            txt = "👥 **Subscribers**\n\n"
+            lines = []
             for u_id, u in users.items():
                 used  = sum(1 for a in cfg["accounts"].values() if a.get("owner") == int(u_id))
                 uname = f"@{u['username']}" if u.get("username") else f"`{u_id}`"
-                txt  += f"• {uname} — limit `{u['limit']}` | used `{used}`\n"
-            await event.respond(txt)
+                lines.append(f"• {uname} — limit `{u['limit']}` | used `{used}`")
+            await event.respond("👥 **Subscribers**\n\n" + "\n".join(lines))
 
-        # ── Add subscriber ────────────────────
+        # ── Add Subscriber ────────────────────
         elif data == "add_sub":
             if not owner:
-                await event.answer("Owner only", alert=True)
+                await event.answer("Owner only.", alert=True)
                 return
-            state[uid] = {"step": "add_sub"}
+            user_state[uid] = {"step": "add_sub"}
             await event.respond(
                 "➕ **Add Subscriber**\n\n"
                 "Format: `@username LIMIT`\n"
                 "Example: `@rahul123 5`"
             )
 
-        # ── Remove subscriber ─────────────────
+        # ── Remove Subscriber — list ──────────
         elif data == "del_sub":
             if not owner:
-                await event.answer("Owner only", alert=True)
+                await event.answer("Owner only.", alert=True)
                 return
-            users = cfg.get("users", {})
+            users = cfg["users"]
             if not users:
                 await event.respond("No subscribers found.")
                 return
@@ -457,93 +435,88 @@ async def run_bot():
                 u_accs = sum(1 for a in cfg["accounts"].values() if a.get("owner") == int(u_id))
                 buttons.append([
                     Button.inline(
-                        f"{uname}  [{u_accs} accounts]",
+                        f"🗑 {uname}  [{u_accs} acc]",
                         f"delsub_{u_id}".encode()
                     )
                 ])
             await event.respond("Select subscriber to remove:", buttons=buttons)
 
+        # ── Remove Subscriber — confirm ───────
         elif data.startswith("delsub_"):
             if not owner:
-                await event.answer("Owner only", alert=True)
+                await event.answer("Owner only.", alert=True)
                 return
-            target = data[len("delsub_"):]
-            u      = cfg["users"].get(target, {})
-            uname  = f"@{u.get('username','')}" if u.get("username") else f"`{target}`"
-            cfg["users"].pop(target, None)
+            t_id  = data[len("delsub_"):]
+            u     = cfg["users"].pop(t_id, {})
             save_cfg(cfg)
-            await event.respond(f"Subscriber {uname} removed.")
+            uname = f"@{u.get('username', t_id)}"
+            await event.respond(f"✅ Subscriber {uname} removed.")
 
-        # ── Subscriber Groups — Step 1: pick subscriber ──
+        # ── Subscriber Groups — Step 1 ────────
         elif data == "subgroups":
             if not owner:
-                await event.answer("Owner only", alert=True)
+                await event.answer("Owner only.", alert=True)
                 return
-            users = cfg.get("users", {})
+            users = cfg["users"]
             if not users:
-                await event.respond("No subscribers yet.")
+                await event.respond("No subscribers found.")
                 return
             buttons = []
             for u_id, u in users.items():
                 uname = f"@{u['username']}" if u.get("username") else f"ID:{u_id}"
-                buttons.append([Button.inline(f"👤 {uname}", f"sg_sub_{u_id}".encode())])
+                buttons.append([Button.inline(f"👤 {uname}", f"sg1_{u_id}".encode())])
             await event.respond("📡 **Subscriber Groups**\n\nSelect subscriber:", buttons=buttons)
 
-        # ── Step 2: pick account ──────────────
-        elif data.startswith("sg_sub_"):
+        # ── Subscriber Groups — Step 2 ────────
+        elif data.startswith("sg1_"):
             if not owner:
-                await event.answer("Owner only", alert=True)
+                await event.answer("Owner only.", alert=True)
                 return
-            target_id = data[len("sg_sub_"):]
-            sub_accs  = {
-                l: a for l, a in cfg["accounts"].items()
-                if str(a.get("owner")) == target_id
-            }
+            t_id     = data[4:]
+            sub_accs = {l: a for l, a in cfg["accounts"].items()
+                        if str(a.get("owner")) == t_id}
             if not sub_accs:
                 await event.respond(
                     "No accounts linked to this subscriber.",
-                    buttons=[[Button.inline("Back", b"subgroups")]]
+                    buttons=[[Button.inline("« Back", b"subgroups")]]
                 )
                 return
-            u     = cfg["users"].get(target_id, {})
-            uname = f"@{u['username']}" if u.get("username") else f"ID:{target_id}"
+            u     = cfg["users"].get(t_id, {})
+            uname = f"@{u['username']}" if u.get("username") else f"ID:{t_id}"
             buttons = [
                 [Button.inline(
                     ("🟢 " if l in account_tasks else "🔴 ") + a["name"],
-                    f"sg_acc_{l}".encode()
+                    f"sg2_{l}".encode()
                 )]
                 for l, a in sub_accs.items()
             ]
-            buttons.append([Button.inline("Back", b"subgroups")])
+            buttons.append([Button.inline("« Back", b"subgroups")])
             await event.respond(f"📱 **{uname}** — select account:", buttons=buttons)
 
-        # ── Step 3: show groups ───────────────
-        elif data.startswith("sg_acc_"):
+        # ── Subscriber Groups — Step 3 ────────
+        elif data.startswith("sg2_"):
             if not owner:
-                await event.answer("Owner only", alert=True)
+                await event.answer("Owner only.", alert=True)
                 return
 
-            label = data[len("sg_acc_"):]
+            label = data[4:]
             acc   = cfg["accounts"].get(label)
             if not acc:
                 await event.respond("Account not found.")
                 return
 
-            owner_id = str(acc.get("owner", ""))
-            u        = cfg["users"].get(owner_id, {})
-            uname    = f"@{u['username']}" if u.get("username") else f"ID:{owner_id}"
-            back_cb  = f"sg_sub_{owner_id}".encode()
+            t_id    = str(acc.get("owner", ""))
+            back_cb = f"sg1_{t_id}".encode()
 
             await event.answer("Fetching groups...")
 
             try:
-                # Uses global pool — same client as broadcast — no DB lock
                 sub_client = await get_client(acc["session"])
 
                 if not await sub_client.is_user_authorized():
                     await event.respond(
-                        "Session expired. Ask subscriber to re-add account.",
-                        buttons=[[Button.inline("Back", back_cb)]]
+                        "⚠️ Session expired. Account needs to be re-added.",
+                        buttons=[[Button.inline("« Back", back_cb)]]
                     )
                     return
 
@@ -551,176 +524,185 @@ async def run_bot():
                 async for dialog in sub_client.iter_dialogs():
                     if not dialog.is_group:
                         continue
-                    entity   = dialog.entity
-                    username = getattr(entity, "username", None)
-                    if username:
-                        link = f"https://t.me/{username}"
+                    entity = dialog.entity
+                    uname  = getattr(entity, "username", None)
+                    if uname:
+                        link = f"https://t.me/{uname}"
                     else:
                         try:
                             inv  = await sub_client(ExportChatInviteRequest(entity))
                             link = inv.link
                         except Exception:
-                            link = None
-                    link_line = link or "_unavailable_"
-                    groups.append(f"• **{dialog.name}**\n  {link_line}")
+                            link = "_unavailable_"
+                    groups.append(f"• **{dialog.name}**\n  {link}")
 
             except Exception as e:
                 await event.respond(
-                    f"Error fetching groups: `{e}`",
-                    buttons=[[Button.inline("Back", back_cb)]]
+                    f"❌ Error: `{e}`",
+                    buttons=[[Button.inline("« Back", back_cb)]]
                 )
                 return
 
             status = "🟢 Running" if label in account_tasks else "🔴 Stopped"
             header = (
-                f"📡 **{acc['name']}** ({uname}) — {status}\n"
+                f"📡 **{acc['name']}** — {status}\n"
                 f"Total Groups: `{len(groups)}`\n\n"
             )
 
             if not groups:
                 await event.respond(
                     header + "_No groups found._",
-                    buttons=[[Button.inline("Back", back_cb)]]
+                    buttons=[[Button.inline("« Back", back_cb)]]
                 )
                 return
 
             chunks = [groups[i:i + 20] for i in range(0, len(groups), 20)]
             for i, chunk in enumerate(chunks):
-                h    = header if i == 0 else f"Page {i+1}/{len(chunks)}\n\n"
-                txt  = h + "\n\n".join(chunk)
-                btns = [[Button.inline("Back", back_cb)]] if i == len(chunks) - 1 else None
-                await event.respond(txt, buttons=btns)
+                head = header if i == 0 else f"Page {i+1}/{len(chunks)}\n\n"
+                btns = [[Button.inline("« Back", back_cb)]] if i == len(chunks) - 1 else None
+                await event.respond(head + "\n\n".join(chunk), buttons=btns)
 
-    # ════════════════════════════════════════
+    # ─────────────────────────────────────────
     #  Message handler (state machine)
-    # ════════════════════════════════════════
+    # ─────────────────────────────────────────
     @bot.on(events.NewMessage)
-    async def on_message(event):
+    async def on_msg(event):
         uid = event.sender_id
-        if uid not in state:
+        if uid not in user_state:
             return
 
-        step = state[uid]["step"]
+        step = user_state[uid]["step"]
         cfg  = load_cfg()
+        text = event.raw_text.strip()
 
         # ── Interval ─────────────────────────
         if step == "interval":
-            try:
-                val = int(event.raw_text.strip())
-                cfg["interval"] = val
-                save_cfg(cfg)
-                state.pop(uid)
-                await event.respond(f"Interval set to `{val} sec`")
-            except ValueError:
-                await event.respond("Enter a valid number.")
+            if not text.isdigit():
+                await event.respond("⚠️ Enter a valid number.")
+                return
+            cfg["interval"] = int(text)
+            save_cfg(cfg)
+            user_state.pop(uid)
+            await event.respond(f"✅ Interval set to `{text} sec`")
 
-        # ── Add subscriber ────────────────────
+        # ── Add Subscriber ────────────────────
         elif step == "add_sub":
-            parts = event.raw_text.strip().split()
+            parts = text.split()
             if len(parts) != 2 or not parts[1].isdigit():
                 await event.respond("Format: `@username LIMIT`\nExample: `@rahul123 5`")
                 return
-
             username = parts[0].lstrip("@")
             limit    = int(parts[1])
-
             try:
                 user = await bot.get_entity(username)
             except Exception:
                 await event.respond(
-                    f"`@{username}` not found. Make sure they have started the bot."
+                    f"❌ `@{username}` not found.\n"
+                    "Make sure the username is correct and they have started the bot."
                 )
                 return
-
-            target_id = str(user.id)
-            if target_id in cfg["users"]:
-                await event.respond(f"`@{username}` is already a subscriber.")
-                state.pop(uid)
+            t_id = str(user.id)
+            if t_id in cfg["users"]:
+                await event.respond(f"⚠️ `@{username}` is already a subscriber.")
+                user_state.pop(uid)
                 return
-
-            cfg["users"][target_id] = {"username": username, "limit": limit}
+            cfg["users"][t_id] = {"username": username, "limit": limit}
             save_cfg(cfg)
-            state.pop(uid)
+            user_state.pop(uid)
             await event.respond(
-                f"Subscriber added!\n\n"
-                f"@{username} | ID: `{target_id}` | Limit: `{limit}`"
+                f"✅ Subscriber added!\n\n"
+                f"👤 @{username}\n"
+                f"🆔 `{t_id}`\n"
+                f"📊 Limit: `{limit}` accounts"
             )
 
         # ── Phone ─────────────────────────────
         elif step == "phone":
-            phone = event.raw_text.strip()
-            if not phone.startswith("+"):
-                await event.respond("Format: `+919876543210`")
+            if not text.startswith("+"):
+                await event.respond("⚠️ Format: `+919876543210`")
                 return
-
             label  = f"acc_{uid}_{len(cfg['accounts']) + 1}"
             client = TelegramClient(f"session_{label}", API_ID, API_HASH)
-            await client.connect()
-            result = await client.send_code_request(phone)
-
-            state[uid] = {
+            try:
+                await client.connect()
+                result = await client.send_code_request(text)
+            except Exception as e:
+                await event.respond(f"❌ Error: `{e}`")
+                return
+            user_state[uid] = {
                 "step":   "otp",
                 "client": client,
-                "phone":  phone,
+                "phone":  text,
                 "hash":   result.phone_code_hash,
                 "label":  label,
             }
-            await event.respond("Enter the OTP:")
+            await event.respond("✉️ Enter the OTP:")
 
         # ── OTP ───────────────────────────────
         elif step == "otp":
-            client = state[uid]["client"]
+            client = user_state[uid]["client"]
             try:
                 await client.sign_in(
-                    state[uid]["phone"],
-                    event.raw_text.strip(),
-                    phone_code_hash=state[uid]["hash"],
+                    user_state[uid]["phone"],
+                    text,
+                    phone_code_hash=user_state[uid]["hash"],
                 )
             except PhoneCodeExpiredError:
-                state.pop(uid)
-                await event.respond("OTP expired. Please add the account again.")
+                user_state.pop(uid)
+                await event.respond("❌ OTP expired. Please add the account again.")
                 return
             except PhoneCodeInvalidError:
-                await event.respond("Invalid OTP. Try again.")
+                await event.respond("❌ Wrong OTP. Try again.")
                 return
             except SessionPasswordNeededError:
-                state[uid]["step"] = "password"
-                await event.respond("Enter your 2FA password:")
+                user_state[uid]["step"] = "2fa"
+                await event.respond("🔐 Enter 2FA password:")
                 return
-
-            await _finish_add(event, uid, client, cfg)
-
-        # ── 2FA Password ──────────────────────
-        elif step == "password":
-            client = state[uid]["client"]
-            try:
-                await client.sign_in(password=event.raw_text.strip())
             except Exception as e:
-                await event.respond(f"2FA failed: `{e}`")
+                await event.respond(f"❌ Error: `{e}`")
                 return
-            await _finish_add(event, uid, client, cfg)
+            await finish_add(event, uid, client, cfg)
+
+        # ── 2FA ───────────────────────────────
+        elif step == "2fa":
+            client = user_state[uid]["client"]
+            try:
+                await client.sign_in(password=text)
+            except Exception as e:
+                await event.respond(f"❌ 2FA failed: `{e}`")
+                return
+            await finish_add(event, uid, client, cfg)
 
     # ─────────────────────────────────────────
-    #  Helper: finish account add
+    #  Finish account add
     # ─────────────────────────────────────────
-    async def _finish_add(event, uid: int, client: TelegramClient, cfg: dict):
-        label        = state[uid]["label"]
-        me           = await client.get_me()
-        logs         = await create_logs_channel(client, me.first_name)
+    async def finish_add(event, uid: int, client: TelegramClient, cfg: dict):
+        label = user_state[uid]["label"]
+        try:
+            me   = await client.get_me()
+            logs = await client(
+                CreateChannelRequest(
+                    title=f"{me.first_name} Logs",
+                    about="Activity logs",
+                    megagroup=False,
+                )
+            )
+            log_ch = logs.chats[0].id
+        except Exception:
+            log_ch = None
+
         session_path = f"session_{label}"
-
-        # Register in global pool so broadcast uses the same instance
-        clients[session_path] = client
+        client_pool[session_path] = client   # register in pool
 
         cfg["accounts"][label] = {
             "session": session_path,
             "name":    me.first_name,
             "owner":   uid,
-            "logs":    logs,
+            "logs":    log_ch,
         }
         save_cfg(cfg)
-        state.pop(uid)
-        await event.respond(f"Account **{me.first_name}** added successfully!")
+        user_state.pop(uid)
+        await event.respond(f"✅ Account **{me.first_name}** added!")
 
     await bot.run_until_disconnected()
 

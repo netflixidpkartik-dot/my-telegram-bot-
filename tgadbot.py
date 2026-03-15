@@ -715,4 +715,5 @@ async def run_bot():
     await bot.run_until_disconnected()
 
 
-asyncio.run(run_bot())
+if __name__ == "__main__":
+    asyncio.run(run_bot())

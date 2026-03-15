@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""
-╔══════════════════════════════════════════════════╗
-║         4xCardsShop — Telegram Bot               ║
-║  Install:  pip install python-telegram-bot       ║
-║  Run:      python 4xcards_bot.py                 ║
-╚══════════════════════════════════════════════════╝
-"""
-
 import asyncio
 import sqlite3
 import random
@@ -14,15 +6,9 @@ import logging
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
+    Application, CommandHandler, CallbackQueryHandler, ContextTypes,
 )
-
-# ══════════════════════════════════════════════════════
-#  ⚙️  CONFIG
-# ══════════════════════════════════════════════════════
+from telegram.error import BadRequest
 
 BOT_TOKEN = "8624189770:AAGvFomH-7Lvc-HCQCfSQ5U8Dsuy4fCTtUg"
 
@@ -36,25 +22,13 @@ WALLETS = {
     "bnb":        ("🟡 BNB Coin (BSC)",         "0xcF0ABcDF3afccBE577d4D930e01af5c7F50f5aB7"),
 }
 
-ADMIN_IDS = []  # e.g. [123456789]
-
-# ══════════════════════════════════════════════════════
-#  🃏  CARD DATA — exactly 12 well-known cards
-# ══════════════════════════════════════════════════════
+ADMIN_IDS = []
 
 COUNTRIES = [
-    ("🇺🇸", "United States"),
-    ("🇬🇧", "United Kingdom"),
-    ("🇨🇦", "Canada"),
-    ("🇦🇺", "Australia"),
-    ("🇩🇪", "Germany"),
-    ("🇫🇷", "France"),
-    ("🇳🇱", "Netherlands"),
-    ("🇸🇬", "Singapore"),
-    ("🇯🇵", "Japan"),
-    ("🇦🇪", "UAE"),
-    ("🇨🇭", "Switzerland"),
-    ("🇸🇪", "Sweden"),
+    ("🇺🇸", "United States"), ("🇬🇧", "United Kingdom"), ("🇨🇦", "Canada"),
+    ("🇦🇺", "Australia"),     ("🇩🇪", "Germany"),        ("🇫🇷", "France"),
+    ("🇳🇱", "Netherlands"),   ("🇸🇬", "Singapore"),      ("🇯🇵", "Japan"),
+    ("🇦🇪", "UAE"),           ("🇨🇭", "Switzerland"),    ("🇸🇪", "Sweden"),
 ]
 
 _fixed_cards = [
@@ -89,10 +63,6 @@ for _i, _c in enumerate(_fixed_cards):
         "country": _country,
     })
 
-# ══════════════════════════════════════════════════════
-#  🗄️  DATABASE
-# ══════════════════════════════════════════════════════
-
 DB_FILE = "4xcards.db"
 
 def init_db():
@@ -116,8 +86,7 @@ def ensure_user(tg_id, name, username=""):
     con = _db()
     con.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?)",
                 (tg_id, name, username, datetime.now().isoformat()))
-    con.commit()
-    con.close()
+    con.commit(); con.close()
 
 def get_cart(tg_id):
     con = _db()
@@ -129,20 +98,17 @@ def get_cart(tg_id):
 def add_to_cart(tg_id, card_id):
     con = _db()
     con.execute("INSERT OR IGNORE INTO carts VALUES (?,?)", (tg_id, card_id))
-    con.commit()
-    con.close()
+    con.commit(); con.close()
 
 def remove_from_cart(tg_id, card_id):
     con = _db()
     con.execute("DELETE FROM carts WHERE tg_id=? AND card_id=?", (tg_id, card_id))
-    con.commit()
-    con.close()
+    con.commit(); con.close()
 
 def clear_cart(tg_id):
     con = _db()
     con.execute("DELETE FROM carts WHERE tg_id=?", (tg_id,))
-    con.commit()
-    con.close()
+    con.commit(); con.close()
 
 def save_orders(tg_id, cart_items, network_name, order_ref):
     con = _db()
@@ -153,8 +119,7 @@ def save_orders(tg_id, cart_items, network_name, order_ref):
             VALUES (?,?,?,?,?,?,?,?,?,'pending',?)""",
             (tg_id, order_ref, c["id"], c["type"], c["num"],
              c["limit"], c["valid"], c["price"], network_name, now))
-    con.commit()
-    con.close()
+    con.commit(); con.close()
 
 def get_orders(tg_id):
     con = _db()
@@ -181,9 +146,7 @@ def get_all_orders_admin():
     con.close()
     return rows
 
-# ══════════════════════════════════════════════════════
-#  🎨 KEYBOARDS
-# ══════════════════════════════════════════════════════
+# ── Keyboards ─────────────────────────────────────────
 
 def kb_main_menu():
     return InlineKeyboardMarkup([
@@ -194,17 +157,15 @@ def kb_main_menu():
     ])
 
 def kb_brand_filter():
-    # Only 3 known brands + ALL
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌐 ALL",         callback_data="filter_all"),
-         InlineKeyboardButton("💳 VISA",        callback_data="filter_visa"),
-         InlineKeyboardButton("🔴 MASTERCARD",  callback_data="filter_mastercard")],
-        [InlineKeyboardButton("💚 AMEX",        callback_data="filter_amex")],
-        [InlineKeyboardButton("🏠 Main Menu",   callback_data="main_menu")],
+        [InlineKeyboardButton("🌐 ALL",        callback_data="filter_all"),
+         InlineKeyboardButton("💳 VISA",       callback_data="filter_visa"),
+         InlineKeyboardButton("🔴 MASTERCARD", callback_data="filter_mastercard")],
+        [InlineKeyboardButton("💚 AMEX",       callback_data="filter_amex")],
+        [InlineKeyboardButton("🏠 Main Menu",  callback_data="main_menu")],
     ])
 
-def kb_cards(cards, page=0, brand="all", per_page=12):
-    # Show all 12 cards at once — no pagination needed
+def kb_cards(cards, brand="all"):
     rows = []
     for c in cards:
         rows.append([InlineKeyboardButton(
@@ -263,9 +224,7 @@ def kb_back_main():
         [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")]
     ])
 
-# ══════════════════════════════════════════════════════
-#  📝  MESSAGE TEXTS  (HTML)
-# ══════════════════════════════════════════════════════
+# ── Text builders ──────────────────────────────────────
 
 HTML = "HTML"
 
@@ -356,16 +315,25 @@ def txt_orders(orders):
         )
     return "📦 <b>My Orders</b>\n\n" + "\n\n".join(lines)
 
-# ══════════════════════════════════════════════════════
-#  🤖  HANDLERS
-# ══════════════════════════════════════════════════════
+# ── Logging ───────────────────────────────────────────
 
 logging.basicConfig(
     format="%(asctime)s — %(name)s — %(levelname)s — %(message)s",
     level=logging.INFO
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+# ── Safe answer helper ────────────────────────────────
+
+async def safe_answer(q, text="", alert=False):
+    """answer() ko try-except mein wrap karo — stale query crash nahi karegi."""
+    try:
+        await q.answer(text, show_alert=alert)
+    except BadRequest:
+        pass  # Query expired — ignore karo
+
+# ── Handlers ──────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -421,7 +389,9 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = q.data
     user = update.effective_user
     ensure_user(user.id, user.first_name, user.username or "")
-    await q.answer()
+
+    # ✅ KEY FIX: stale query crash nahi karegi
+    await safe_answer(q)
 
     if data == "main_menu":
         await q.edit_message_text(
@@ -443,18 +413,14 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode=HTML, reply_markup=kb_back_main())
 
     elif data == "browse_all" or data.startswith("filter_"):
-        if data == "browse_all":
-            brand = "all"
-        else:
-            brand = data[7:]
+        brand    = "all" if data == "browse_all" else data[7:]
         filtered = ALL_CARDS if brand == "all" else [c for c in ALL_CARDS if c["brand"].lower() == brand]
         label    = "All Cards" if brand == "all" else brand.upper()
         await q.edit_message_text(
             f"🃏 <b>Card Catalog — {label}</b>\n"
             f"<i>{len(filtered)} cards available</i>\n\n"
             "Tap a card to view details:",
-            parse_mode=HTML,
-            reply_markup=kb_cards(filtered, brand=brand))
+            parse_mode=HTML, reply_markup=kb_cards(filtered, brand=brand))
 
     elif data == "brand_filter":
         await q.edit_message_text(
@@ -463,9 +429,9 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("card_"):
         card_id = int(data[5:])
-        card = next((c for c in ALL_CARDS if c["id"] == card_id), None)
+        card    = next((c for c in ALL_CARDS if c["id"] == card_id), None)
         if not card:
-            await q.answer("Card not found.", show_alert=True)
+            await safe_answer(q, "Card not found.", alert=True)
             return
         in_cart = any(c["id"] == card_id for c in get_cart(user.id))
         await q.edit_message_text(
@@ -475,10 +441,10 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("addcart_"):
         card_id = int(data[8:])
         if any(c["id"] == card_id for c in get_cart(user.id)):
-            await q.answer("Already in your cart!", show_alert=True)
+            await safe_answer(q, "Already in your cart!", alert=True)
         else:
             add_to_cart(user.id, card_id)
-            await q.answer("Added to cart!", show_alert=True)
+            await safe_answer(q, "Added to cart!", alert=True)
             await q.edit_message_reply_markup(reply_markup=kb_card_detail(card_id, True))
 
     elif data.startswith("buynow_"):
@@ -500,7 +466,6 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("rmcart_"):
         card_id = int(data[7:])
         remove_from_cart(user.id, card_id)
-        await q.answer("Removed from cart.")
         cart_items = get_cart(user.id)
         if not cart_items:
             await q.edit_message_text(
@@ -516,12 +481,12 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("pay_"):
         network_key = data[4:]
         if network_key not in WALLETS:
-            await q.answer("Invalid network.", show_alert=True)
+            await safe_answer(q, "Invalid network.", alert=True)
             return
         name, addr = WALLETS[network_key]
-        cart_items = get_cart(user.id)
+        cart_items  = get_cart(user.id)
         if not cart_items:
-            await q.answer("Cart is empty!", show_alert=True)
+            await safe_answer(q, "Cart is empty!", alert=True)
             return
         total = sum(c["price"] for c in cart_items)
         await q.edit_message_text(
@@ -532,9 +497,9 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         network_key = data[8:]
         cart_items  = get_cart(user.id)
         if not cart_items:
-            await q.answer("Cart is empty!", show_alert=True)
+            await safe_answer(q, "Cart is empty!", alert=True)
             return
-        name, _ = WALLETS.get(network_key, ("Unknown", ""))
+        name, _   = WALLETS.get(network_key, ("Unknown", ""))
         order_ref = f"#4X{random.randint(10000, 99999)}"
         save_orders(user.id, cart_items, name, order_ref)
         clear_cart(user.id)
@@ -557,14 +522,11 @@ async def _show_checkout(q, user_id):
     await q.edit_message_text(
         txt_checkout(cart_items), parse_mode=HTML, reply_markup=kb_crypto())
 
-# ══════════════════════════════════════════════════════
-#  🚀  MAIN
-# ══════════════════════════════════════════════════════
+# ── Main ──────────────────────────────────────────────
 
 async def run_cc():
     init_db()
     logger.info("4xCardsShop: Database initialized")
-
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("menu",   cmd_menu))
@@ -572,19 +534,16 @@ async def run_cc():
     app.add_handler(CommandHandler("orders", cmd_orders))
     app.add_handler(CommandHandler("admin",  cmd_admin))
     app.add_handler(CallbackQueryHandler(on_callback))
-
     await app.initialize()
     await app.start()
     await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     print("cc.py (4xCardsShop) chal raha hai...")
-
     try:
         await asyncio.Event().wait()
     finally:
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
-
 
 if __name__ == "__main__":
     asyncio.run(run_cc())

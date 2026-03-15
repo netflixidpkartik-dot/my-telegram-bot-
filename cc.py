@@ -572,15 +572,18 @@ async def run_cc():
     app.add_handler(CommandHandler("admin",  cmd_admin))
     app.add_handler(CallbackQueryHandler(on_callback))
 
-    logger.info("4xCardsShop Bot started")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     print("cc.py (4xCardsShop) chal raha hai...")
 
-    async with app:
-        await app.start()
-        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    try:
         await asyncio.Event().wait()
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
 
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(run_cc())

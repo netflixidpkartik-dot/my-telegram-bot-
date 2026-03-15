@@ -538,7 +538,16 @@ async def run_bot():
                 from telethon.tl.functions.messages import ExportChatInviteRequest
 
                 sub_client = TelegramClient(acc["session"], API_ID, API_HASH)
-                await sub_client.connect()
+                await sub_client.start()  # ✅ FIX: connect() → start() so session is properly authenticated
+
+                if not await sub_client.is_user_authorized():
+                    await event.respond(
+                        "⚠️ Session expire ho gayi hai. Yeh account dobara add karo.",
+                        buttons=[[Button.inline("« Wapas", back_cb)]]
+                    )
+                    await sub_client.disconnect()
+                    return
+
                 groups = []
 
                 async for dialog in sub_client.iter_dialogs():

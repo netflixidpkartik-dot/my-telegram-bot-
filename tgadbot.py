@@ -300,7 +300,6 @@ async def run_bot():
         if uid not in user_state:
             await event.respond("No active process.")
             return
-
         await cleanup_user_state(uid)
         await event.respond("❌ Process cancelled.")
 
@@ -611,19 +610,26 @@ async def run_bot():
             user_state.pop(uid, None)
             await event.respond(f"✅ Subscriber added!\n\n👤 @{username}\n🆔 `{t_id}`\n📊 Limit: `{limit}` accounts")
 
+        # ── Phone ─────────────────────────────
         elif step == "phone":
             if not text.startswith("+"):
                 await event.respond("⚠️ Format: `+919876543210`")
                 return
 
-            label = f"acc_{uid}_{int(time.time())}"
-            client = TelegramClient(StringSession(), API_ID, API_HASH)
+            if uid in user_state:
+                await cleanup_user_state(uid)
+
+            label        = f"acc_{uid}_{int(time.time())}"
+            session_path = f"session_{label}"
+
+            # ✅ File-based session — DC info survives any reconnect
+            client = TelegramClient(session_path, API_ID, API_HASH)
 
             try:
                 await client.connect()
                 result = await client.send_code_request(text)
             except Exception as e:
-                await event.respond(f"❌ Error: `{e}`")
+                await event.respond(f"❌ Failed to send OTP: `{e}`")
                 try:
                     await client.disconnect()
                 except Exception:
@@ -631,28 +637,34 @@ async def run_bot():
                 return
 
             user_state[uid] = {
-                "step": "otp",
-                "client": client,
-                "phone": text,
-                "hash": result.phone_code_hash,
-                "label": label,
-                "otp_tries": 0,
-                "twofa_tries": 0,
+                "step":         "otp",
+                "client":       client,
+                "phone":        text,
+                "hash":         result.phone_code_hash,
+                "label":        label,
+                "session_path": session_path,
+                "otp_tries":    0,
+                "twofa_tries":  0,
             }
 
-            await event.respond("✉️ Enter the OTP.\nIt expires quickly, so do not waste time.\nUse /cancel to stop.")
+            await event.respond(
+                "✉️ OTP sent.\n"
+                "Enter it FAST — expires in ~2 min.\n"
+                "Use /cancel to stop."
+            )
 
+        # ── OTP ───────────────────────────────
         elif step == "otp":
-            st = user_state[uid]
+            st     = user_state[uid]
             client = st["client"]
 
             if not client.is_connected():
                 await client.connect()
 
-            st["otp_tries"] = st.get("otp_tries", 0) + 1
+            st["otp_tries"] += 1
 
             if st["otp_tries"] > MAX_OTP_TRIES:
-                await event.respond("❌ Too many wrong/expired OTP attempts. Start again.")
+                await event.respond("❌ Too many failed attempts. Start again.")
                 await cleanup_user_state(uid)
                 return
 
@@ -663,35 +675,24 @@ async def run_bot():
                     phone_code_hash=st["hash"],
                 )
 
-            except PhoneCodeExpiredError:
-                try:
-                    if not client.is_connected():
-                        await client.connect()
-
-                    result = await client.send_code_request(st["phone"])
-                    st["hash"] = result.phone_code_hash
-
-                    await event.respond(
-                        "⚠️ OTP expired. New OTP sent.\n"
-                        "Enter the new OTP now."
-                    )
-                except Exception as resend_err:
-                    await event.respond(f"❌ Could not resend OTP: `{resend_err}`\nStart again.")
-                    await cleanup_user_state(uid)
-                return
-
             except PhoneCodeInvalidError:
                 left = MAX_OTP_TRIES - st["otp_tries"]
-                if left <= 0:
-                    await event.respond("❌ Wrong OTP too many times. Start again.")
-                    await cleanup_user_state(uid)
-                else:
-                    await event.respond(f"❌ Wrong OTP. Attempts left: `{left}`")
+                await event.respond(f"❌ Wrong OTP. Attempts left: `{left}`")
+                return
+
+            except PhoneCodeExpiredError:
+                # ✅ Don't auto-resend — tell user to restart cleanly
+                await event.respond(
+                    "❌ OTP expired.\n\n"
+                    "Wait 60 sec, then press ➕ Add Account again.\n"
+                    "Enter the OTP as soon as you receive it."
+                )
+                await cleanup_user_state(uid)
                 return
 
             except SessionPasswordNeededError:
                 st["step"] = "2fa"
-                await event.respond("🔐 Enter 2FA password.\nUse /cancel to stop.")
+                await event.respond("🔐 Enter 2FA password:\nUse /cancel to stop.")
                 return
 
             except Exception as e:
@@ -699,16 +700,17 @@ async def run_bot():
                 await cleanup_user_state(uid)
                 return
 
-            await finish_add(event, uid, client, cfg)
+            await finish_add(event, uid, client, load_cfg())
 
+        # ── 2FA ───────────────────────────────
         elif step == "2fa":
-            st = user_state[uid]
+            st     = user_state[uid]
             client = st["client"]
 
             if not client.is_connected():
                 await client.connect()
 
-            st["twofa_tries"] = st.get("twofa_tries", 0) + 1
+            st["twofa_tries"] += 1
 
             if st["twofa_tries"] > MAX_2FA_TRIES:
                 await event.respond("❌ Too many wrong 2FA attempts. Start again.")
@@ -717,16 +719,12 @@ async def run_bot():
 
             try:
                 await client.sign_in(password=text)
-            except Exception as e:
+            except Exception:
                 left = MAX_2FA_TRIES - st["twofa_tries"]
-                if left <= 0:
-                    await event.respond(f"❌ 2FA failed: `{e}`\nNo attempts left.")
-                    await cleanup_user_state(uid)
-                else:
-                    await event.respond(f"❌ 2FA failed: `{e}`\nAttempts left: `{left}`")
+                await event.respond(f"❌ Wrong password. Attempts left: `{left}`")
                 return
 
-            await finish_add(event, uid, client, cfg)
+            await finish_add(event, uid, client, load_cfg())
 
     async def finish_add(event, uid: int, client: TelegramClient, cfg: dict):
         if uid not in user_state:
@@ -737,7 +735,9 @@ async def run_bot():
                 pass
             return
 
-        label = user_state[uid]["label"]
+        st           = user_state[uid]
+        label        = st["label"]
+        session_path = st["session_path"]
 
         try:
             me = await client.get_me()
@@ -754,34 +754,14 @@ async def run_bot():
             except Exception:
                 log_ch = None
 
-            session_path = f"session_{label}"
-
-            try:
-                session_str = client.session.save()
-                str_sess_obj = StringSession(session_str)
-                file_session = SQLiteSession(session_path)
-
-                file_session.set_dc(
-                    str_sess_obj.dc_id,
-                    str_sess_obj.server_address,
-                    str_sess_obj.port
-                )
-                file_session.auth_key = str_sess_obj.auth_key
-                file_session.save()
-
-            except Exception as e:
-                print(f"[finish_add] session save warning: {e}")
-                await event.respond(f"❌ Failed to save session: `{e}`")
-                await cleanup_user_state(uid)
-                return
-
+            # ✅ Telethon already saved the session to file — just register in pool
             client_pool[session_path] = client
 
             cfg["accounts"][label] = {
                 "session": session_path,
-                "name": me.first_name or "Unknown",
-                "owner": uid,
-                "logs": log_ch,
+                "name":    me.first_name or "Unknown",
+                "owner":   uid,
+                "logs":    log_ch,
             }
             save_cfg(cfg)
 

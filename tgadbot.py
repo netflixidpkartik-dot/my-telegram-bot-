@@ -4,7 +4,6 @@ import os
 import random
 
 from telethon import TelegramClient, events, Button
-from telethon.sessions import StringSession, SQLiteSession
 from telethon.errors import (
     FloodWaitError,
     SessionPasswordNeededError,
@@ -24,9 +23,10 @@ CONFIG           = "accounts.json"
 DEFAULT_INTERVAL = 90
 CYCLE_DELAY      = 60
 
-user_state    = {}
-account_tasks = {}
-client_pool   = {}
+user_state      = {}
+account_tasks   = {}
+client_pool     = {}
+keepalive_tasks = {}   # uid -> asyncio.Task  keeps login client alive
 
 def load_cfg() -> dict:
     if os.path.exists(CONFIG):
@@ -55,6 +55,36 @@ def account_limit_ok(uid: int) -> bool:
     used = sum(1 for a in cfg["accounts"].values() if a.get("owner") == uid)
     return used < u["limit"]
 
+# ══════════════════════════════════════════════
+#  KEEPALIVE — ping every 20s so Telegram never
+#  invalidates the phone_code_hash mid-flow
+# ══════════════════════════════════════════════
+
+async def _keepalive_loop(client: TelegramClient):
+    try:
+        while True:
+            await asyncio.sleep(20)
+            try:
+                if client.is_connected():
+                    await client.get_me()
+            except Exception:
+                pass
+    except asyncio.CancelledError:
+        pass
+
+def keepalive_start(uid: int, client: TelegramClient):
+    keepalive_stop(uid)
+    keepalive_tasks[uid] = asyncio.create_task(_keepalive_loop(client))
+
+def keepalive_stop(uid: int):
+    t = keepalive_tasks.pop(uid, None)
+    if t:
+        t.cancel()
+
+# ══════════════════════════════════════════════
+#  CLIENT POOL
+# ══════════════════════════════════════════════
+
 async def get_client(session: str) -> TelegramClient:
     if session in client_pool:
         c = client_pool[session]
@@ -73,6 +103,10 @@ async def drop_client(session: str):
             await c.disconnect()
         except Exception:
             pass
+
+# ══════════════════════════════════════════════
+#  BROADCAST ENGINE
+# ══════════════════════════════════════════════
 
 async def broadcast_loop(label: str):
     cfg = load_cfg()
@@ -116,7 +150,7 @@ async def broadcast_loop(label: str):
                         await client.send_file(d.id, msg.media, caption=msg.text or "")
                     elif msg.text:
                         await client.send_message(d.id, msg.text)
-                    await log(f"Sent → {d.name}")
+                    await log(f"Sent -> {d.name}")
                     await asyncio.sleep(random.randint(interval, interval + 30))
                 except FloodWaitError as e:
                     await log(f"FloodWait {e.seconds}s — waiting")
@@ -140,6 +174,10 @@ def task_stop(label: str):
     t = account_tasks.pop(label, None)
     if t:
         t.cancel()
+
+# ══════════════════════════════════════════════
+#  PANELS
+# ══════════════════════════════════════════════
 
 async def owner_panel(event, cfg: dict):
     total   = len(cfg["accounts"])
@@ -184,6 +222,10 @@ async def sub_panel(event, uid: int, cfg: dict):
             [Button.inline("⏱️ Set Interval", b"interval")],
         ]
     )
+
+# ══════════════════════════════════════════════
+#  BOT
+# ══════════════════════════════════════════════
 
 async def run_bot():
     bot = TelegramClient("bot_session", API_ID, API_HASH)
@@ -486,10 +528,17 @@ async def run_bot():
             if not text.startswith("+"):
                 await event.respond("⚠️ Format: `+919876543210`")
                 return
-            label = f"acc_{uid}_{int(time.time())}"
+            label       = f"acc_{uid}_{int(time.time())}"
+            tmp_session = f"tmp_login_{uid}"
 
-            # ✅ FIX: Use StringSession (in-memory) — no file lock / stale session issues
-            client = TelegramClient(StringSession(), API_ID, API_HASH)
+            # Remove stale temp session if exists
+            for ext in ["", ".session"]:
+                try:
+                    os.remove(f"{tmp_session}{ext}")
+                except Exception:
+                    pass
+
+            client = TelegramClient(tmp_session, API_ID, API_HASH)
             try:
                 await client.connect()
                 result = await client.send_code_request(text)
@@ -502,73 +551,68 @@ async def run_bot():
                 return
 
             user_state[uid] = {
-                "step":   "otp",
-                "client": client,
-                "phone":  text,
-                "hash":   result.phone_code_hash,
-                "label":  label,
+                "step":        "otp",
+                "client":      client,
+                "phone":       text,
+                "hash":        result.phone_code_hash,
+                "label":       label,
+                "tmp_session": tmp_session,
             }
+            # ✅ Keepalive ping every 20s — prevents Telegram from expiring the OTP hash
+            keepalive_start(uid, client)
             await event.respond("✉️ Enter the OTP:")
 
         # ── OTP ───────────────────────────────
         elif step == "otp":
             client = user_state[uid]["client"]
-
             if not client.is_connected():
                 await client.connect()
-
             try:
                 await client.sign_in(
                     user_state[uid]["phone"],
                     text,
                     phone_code_hash=user_state[uid]["hash"],
                 )
-
             except PhoneCodeExpiredError:
-                # ✅ FIX: Auto-resend OTP — no need to start over
-                try:
-                    if not client.is_connected():
-                        await client.connect()
-                    result = await client.send_code_request(user_state[uid]["phone"])
-                    user_state[uid]["hash"] = result.phone_code_hash
-                    await event.respond("⚠️ OTP expired. **New OTP sent!** Please enter the new one:")
-                except Exception as resend_err:
-                    user_state.pop(uid)
-                    await event.respond(f"❌ Could not resend OTP: `{resend_err}`\n\nPlease start again with ➕ Add Account.")
+                keepalive_stop(uid)
+                user_state.pop(uid, None)
+                await event.respond(
+                    "❌ OTP expired (Telegram ki 2 min limit hai).\n\n"
+                    "Please ➕ Add Account se dobara try karo aur OTP **turant** enter karo."
+                )
                 return
-
             except PhoneCodeInvalidError:
-                await event.respond("❌ Wrong OTP. Try again.")
+                await event.respond("❌ Wrong OTP. Try again:")
                 return
-
             except SessionPasswordNeededError:
                 user_state[uid]["step"] = "2fa"
                 await event.respond("🔐 Enter 2FA password:")
                 return
-
             except Exception as e:
                 await event.respond(f"❌ Error: `{e}`")
                 return
-
+            keepalive_stop(uid)
             await finish_add(event, uid, client, cfg)
 
         # ── 2FA ───────────────────────────────
         elif step == "2fa":
             client = user_state[uid]["client"]
-
             if not client.is_connected():
                 await client.connect()
-
             try:
                 await client.sign_in(password=text)
             except Exception as e:
                 await event.respond(f"❌ 2FA failed: `{e}`")
                 return
-
+            keepalive_stop(uid)
             await finish_add(event, uid, client, cfg)
 
     async def finish_add(event, uid: int, client: TelegramClient, cfg: dict):
-        label = user_state[uid]["label"]
+        state        = user_state[uid]
+        label        = state["label"]
+        tmp_session  = state.get("tmp_session", f"tmp_login_{uid}")
+        session_path = f"session_{label}"
+
         try:
             me   = await client.get_me()
             logs = await client(
@@ -582,24 +626,16 @@ async def run_bot():
         except Exception:
             log_ch = None
 
-        session_path = f"session_{label}"
+        # Rename tmp session file → final session name for persistence
+        for ext in ["", ".session"]:
+            src = f"{tmp_session}{ext}"
+            dst = f"{session_path}{ext}"
+            if os.path.exists(src):
+                try:
+                    os.rename(src, dst)
+                except Exception:
+                    pass
 
-        # ✅ FIX: Export in-memory StringSession → SQLite file for future restarts
-        try:
-            session_str  = client.session.save()
-            str_sess_obj = StringSession(session_str)
-            file_session = SQLiteSession(session_path)
-            file_session.set_dc(
-                str_sess_obj.dc_id,
-                str_sess_obj.server_address,
-                str_sess_obj.port
-            )
-            file_session.auth_key = str_sess_obj.auth_key
-            file_session.save()
-        except Exception as e:
-            print(f"[finish_add] session save warning: {e}")
-
-        # Keep the already-authenticated client in pool
         client_pool[session_path] = client
 
         cfg["accounts"][label] = {
@@ -613,5 +649,6 @@ async def run_bot():
         await event.respond(f"✅ Account **{me.first_name}** added successfully!")
 
     await bot.run_until_disconnected()
+
 
 asyncio.run(run_bot())

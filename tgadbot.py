@@ -653,6 +653,9 @@ async def run_bot():
         # ── OTP ───────────────────────────────
         elif step == "otp":
             client = user_state[uid]["client"]
+            # ✅ FIX: Reconnect if connection dropped while user was entering OTP
+            if not client.is_connected():
+                await client.connect()
             try:
                 await client.sign_in(
                     user_state[uid]["phone"],
@@ -678,6 +681,9 @@ async def run_bot():
         # ── 2FA ───────────────────────────────
         elif step == "2fa":
             client = user_state[uid]["client"]
+            # ✅ FIX: Reconnect if connection dropped while user was entering 2FA
+            if not client.is_connected():
+                await client.connect()
             try:
                 await client.sign_in(password=text)
             except Exception as e:

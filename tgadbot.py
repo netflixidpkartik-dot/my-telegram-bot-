@@ -5,7 +5,6 @@ import random
 import time
 
 from telethon import TelegramClient, events, Button
-from telethon.sessions import StringSession, SQLiteSession
 from telethon.errors import (
     FloodWaitError,
     SessionPasswordNeededError,
@@ -23,8 +22,6 @@ OWNER_ID  = 6965061227
 CONFIG           = "accounts.json"
 DEFAULT_INTERVAL = 90
 CYCLE_DELAY      = 60
-MAX_OTP_TRIES    = 3
-MAX_2FA_TRIES    = 3
 
 user_state    = {}
 account_tasks = {}
@@ -37,7 +34,7 @@ def load_cfg() -> dict:
             with open(CONFIG, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if not isinstance(data, dict):
-                    raise ValueError("Invalid config format")
+                    raise ValueError
                 data.setdefault("owner", 0)
                 data.setdefault("interval", DEFAULT_INTERVAL)
                 data.setdefault("users", {})
@@ -79,13 +76,10 @@ async def get_client(session: str) -> TelegramClient:
         if not c.is_connected():
             await c.connect()
         return c
-
     c = TelegramClient(session, API_ID, API_HASH)
     await c.connect()
-
     if not await c.is_user_authorized():
         raise RuntimeError("Session is not authorized")
-
     client_pool[session] = c
     return c
 
@@ -99,30 +93,16 @@ async def drop_client(session: str):
             pass
 
 
-async def cleanup_user_state(uid: int):
-    st = user_state.pop(uid, None)
-    if not st:
-        return
-    client = st.get("client")
-    if client:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
-
-
 async def broadcast_loop(label: str):
     cfg = load_cfg()
     acc = cfg["accounts"].get(label)
     if not acc:
         return
-
     try:
         client = await get_client(acc["session"])
     except Exception as e:
         print(f"[{label}] start failed: {e}")
         return
-
     log_ch = acc.get("logs")
 
     async def log(txt):
@@ -138,47 +118,35 @@ async def broadcast_loop(label: str):
             cfg = load_cfg()
             interval = cfg.get("interval", DEFAULT_INTERVAL)
             acc = cfg["accounts"].get(label)
-
             if not acc:
                 break
-
             msgs = await client.get_messages("me", limit=1)
             if not msgs:
                 await asyncio.sleep(CYCLE_DELAY)
                 continue
-
             msg = msgs[0]
             dialogs = []
-
             async for d in client.iter_dialogs():
                 if d.is_group:
                     dialogs.append(d)
-
             for d in dialogs:
                 try:
                     if msg.media:
                         await client.send_file(d.id, msg.media, caption=msg.text or "")
                     elif msg.text:
                         await client.send_message(d.id, msg.text)
-
                     await log(f"Sent → {d.name}")
                     await asyncio.sleep(random.randint(interval, interval + 30))
-
                 except FloodWaitError as e:
                     await log(f"FloodWait {e.seconds}s — waiting")
                     await asyncio.sleep(e.seconds)
-
                 except asyncio.CancelledError:
                     return
-
                 except Exception as e:
                     await log(f"Error [{d.name}]: {e}")
-
             await asyncio.sleep(CYCLE_DELAY)
-
         except asyncio.CancelledError:
             return
-
         except Exception as e:
             print(f"[{label}] loop error: {e}")
             await asyncio.sleep(15)
@@ -196,10 +164,9 @@ def task_stop(label: str):
 
 
 async def owner_panel(event, cfg: dict):
-    total = len(cfg["accounts"])
+    total   = len(cfg["accounts"])
     running = sum(1 for l in cfg["accounts"] if l in account_tasks)
-    subs = len(cfg["users"])
-
+    subs    = len(cfg["users"])
     await event.respond(
         f"👑 **OWNER PANEL**\n\n"
         f"📱 Accounts    : `{total}`\n"
@@ -218,15 +185,14 @@ async def owner_panel(event, cfg: dict):
 
 
 async def sub_panel(event, uid: int, cfg: dict):
-    u = cfg["users"][str(uid)]
-    limit = u["limit"]
-    my = [l for l, a in cfg["accounts"].items() if a.get("owner") == uid]
-    used = len(my)
+    u       = cfg["users"][str(uid)]
+    limit   = u["limit"]
+    my      = [l for l, a in cfg["accounts"].items() if a.get("owner") == uid]
+    used    = len(my)
     running = sum(1 for l in my if l in account_tasks)
     stopped = used - running
-    left = limit - used
-    bar = "🟢" * running + "🔴" * stopped + "⚫" * max(0, left)
-
+    left    = limit - used
+    bar     = "🟢" * running + "🔴" * stopped + "⚫" * max(0, left)
     await event.respond(
         f"🚀 **Dustin Adbot**\n\n"
         f"📱 Accounts : `{used}/{limit}`\n"
@@ -251,7 +217,6 @@ async def run_bot():
     async def cmd_start(event):
         cfg = load_cfg()
         uid = event.sender_id
-
         if OWNER_ID != 0:
             if cfg["owner"] != OWNER_ID:
                 cfg["owner"] = OWNER_ID
@@ -262,7 +227,6 @@ async def run_bot():
                 cfg["owner"] = uid
                 save_cfg(cfg)
                 cfg = load_cfg()
-
         if not is_auth(uid):
             await event.respond(
                 "╔══════════════════════╗\n"
@@ -288,7 +252,6 @@ async def run_bot():
                 "💎 **DUSTIN ADBOT** — Premium Only"
             )
             return
-
         if is_owner(uid):
             await owner_panel(event, cfg)
         else:
@@ -297,22 +260,26 @@ async def run_bot():
     @bot.on(events.NewMessage(pattern="/cancel", func=lambda e: e.is_private))
     async def cancel_flow(event):
         uid = event.sender_id
-        if uid not in user_state:
+        st  = user_state.pop(uid, None)
+        if not st:
             await event.respond("No active process.")
             return
-        await cleanup_user_state(uid)
-        await event.respond("❌ Process cancelled.")
+        client = st.get("client")
+        if client:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        await event.respond("❌ Cancelled.")
 
     @bot.on(events.CallbackQuery)
     async def on_cb(event):
-        uid = event.sender_id
+        uid  = event.sender_id
         data = event.data.decode()
-
         if not is_auth(uid):
             await event.answer("Access denied.", alert=True)
             return
-
-        cfg = load_cfg()
+        cfg   = load_cfg()
         owner = is_owner(uid)
 
         if data == "start":
@@ -354,12 +321,8 @@ async def run_bot():
             if not account_limit_ok(uid):
                 await event.respond("⚠️ Account limit reached.")
                 return
-
-            if uid in user_state:
-                await cleanup_user_state(uid)
-
             user_state[uid] = {"step": "phone"}
-            await event.respond("📱 Send phone number.\nExample: `+919876543210`\n\nUse /cancel to stop.")
+            await event.respond("📱 Send phone number.\nExample: `+919876543210`\n\nType /cancel to stop.")
 
         elif data == "del":
             buttons = []
@@ -373,48 +336,41 @@ async def run_bot():
 
         elif data.startswith("del_") and not data.startswith("del_sub"):
             label = data[4:]
-            acc = cfg["accounts"].get(label)
+            acc   = cfg["accounts"].get(label)
             if not acc:
                 await event.respond("Account not found.")
                 return
             if not owner and acc.get("owner") != uid:
                 await event.answer("Not your account.", alert=True)
                 return
-
-            name = acc["name"]
+            name         = acc["name"]
             session_name = acc.get("session", "")
-
             cfg["accounts"].pop(label, None)
             save_cfg(cfg)
             task_stop(label)
             await drop_client(session_name)
-
             for ext in ("", ".session", ".session-journal"):
-                path = f"{session_name}{ext}"
-                if path and os.path.exists(path):
+                p = f"{session_name}{ext}"
+                if p and os.path.exists(p):
                     try:
-                        os.remove(path)
+                        os.remove(p)
                     except Exception:
                         pass
-
             await event.respond(f"✅ **{name}** removed.")
 
         elif data == "subs":
             if not owner:
                 await event.answer("Owner only.", alert=True)
                 return
-
             users = cfg["users"]
             if not users:
                 await event.respond("No subscribers yet.")
                 return
-
             lines = []
             for u_id, u in users.items():
-                used = sum(1 for a in cfg["accounts"].values() if a.get("owner") == int(u_id))
+                used  = sum(1 for a in cfg["accounts"].values() if a.get("owner") == int(u_id))
                 uname = f"@{u['username']}" if u.get("username") else f"`{u_id}`"
                 lines.append(f"• {uname} — limit `{u['limit']}` | used `{used}`")
-
             await event.respond("👥 **Subscribers**\n\n" + "\n".join(lines))
 
         elif data == "add_sub":
@@ -428,27 +384,23 @@ async def run_bot():
             if not owner:
                 await event.answer("Owner only.", alert=True)
                 return
-
             users = cfg["users"]
             if not users:
                 await event.respond("No subscribers found.")
                 return
-
             buttons = []
             for u_id, u in users.items():
-                uname = f"@{u['username']}" if u.get("username") else f"ID:{u_id}"
+                uname  = f"@{u['username']}" if u.get("username") else f"ID:{u_id}"
                 u_accs = sum(1 for a in cfg["accounts"].values() if a.get("owner") == int(u_id))
                 buttons.append([Button.inline(f"🗑 {uname}  [{u_accs} acc]", f"delsub_{u_id}".encode())])
-
             await event.respond("Select subscriber to remove:", buttons=buttons)
 
         elif data.startswith("delsub_"):
             if not owner:
                 await event.answer("Owner only.", alert=True)
                 return
-
-            t_id = data[len("delsub_"):]
-            u = cfg["users"].pop(t_id, {})
+            t_id  = data[len("delsub_"):]
+            u     = cfg["users"].pop(t_id, {})
             save_cfg(cfg)
             uname = f"@{u.get('username', t_id)}"
             await event.respond(f"✅ Subscriber {uname} removed.")
@@ -457,320 +409,246 @@ async def run_bot():
             if not owner:
                 await event.answer("Owner only.", alert=True)
                 return
-
             users = cfg["users"]
             if not users:
                 await event.respond("No subscribers found.")
                 return
-
             buttons = []
             for u_id, u in users.items():
                 uname = f"@{u['username']}" if u.get("username") else f"ID:{u_id}"
                 buttons.append([Button.inline(f"👤 {uname}", f"sg1_{u_id}".encode())])
-
             await event.respond("📡 **Subscriber Groups**\n\nSelect subscriber:", buttons=buttons)
 
         elif data.startswith("sg1_"):
             if not owner:
                 await event.answer("Owner only.", alert=True)
                 return
-
-            t_id = data[4:]
+            t_id     = data[4:]
             sub_accs = {l: a for l, a in cfg["accounts"].items() if str(a.get("owner")) == t_id}
-
             if not sub_accs:
-                await event.respond(
-                    "No accounts linked to this subscriber.",
-                    buttons=[[Button.inline("« Back", b"subgroups")]]
-                )
+                await event.respond("No accounts linked to this subscriber.", buttons=[[Button.inline("« Back", b"subgroups")]])
                 return
-
-            u = cfg["users"].get(t_id, {})
+            u     = cfg["users"].get(t_id, {})
             uname = f"@{u['username']}" if u.get("username") else f"ID:{t_id}"
             buttons = [
                 [Button.inline(("🟢 " if l in account_tasks else "🔴 ") + a["name"], f"sg2_{l}".encode())]
                 for l, a in sub_accs.items()
             ]
             buttons.append([Button.inline("« Back", b"subgroups")])
-
             await event.respond(f"📱 **{uname}** — select account:", buttons=buttons)
 
         elif data.startswith("sg2_"):
             if not owner:
                 await event.answer("Owner only.", alert=True)
                 return
-
             label = data[4:]
-            acc = cfg["accounts"].get(label)
+            acc   = cfg["accounts"].get(label)
             if not acc:
                 await event.respond("Account not found.")
                 return
-
-            t_id = str(acc.get("owner", ""))
+            t_id    = str(acc.get("owner", ""))
             back_cb = f"sg1_{t_id}".encode()
-
             await event.answer("Fetching groups...")
-
             try:
                 sub_client = await get_client(acc["session"])
-
                 if not await sub_client.is_user_authorized():
-                    await event.respond(
-                        "⚠️ Session expired. Account needs to be re-added.",
-                        buttons=[[Button.inline("« Back", back_cb)]]
-                    )
+                    await event.respond("⚠️ Session expired. Re-add account.", buttons=[[Button.inline("« Back", back_cb)]])
                     return
-
                 groups = []
                 async for dialog in sub_client.iter_dialogs():
                     if not dialog.is_group:
                         continue
-
                     entity = dialog.entity
-                    uname = getattr(entity, "username", None)
-
+                    uname  = getattr(entity, "username", None)
                     if uname:
                         link = f"https://t.me/{uname}"
                     else:
                         try:
-                            inv = await sub_client(ExportChatInviteRequest(entity))
+                            inv  = await sub_client(ExportChatInviteRequest(entity))
                             link = inv.link
                         except Exception:
                             link = "_unavailable_"
-
                     groups.append(f"• **{dialog.name}**\n  {link}")
-
             except Exception as e:
                 await event.respond(f"❌ Error: `{e}`", buttons=[[Button.inline("« Back", back_cb)]])
                 return
-
             status = "🟢 Running" if label in account_tasks else "🔴 Stopped"
             header = f"📡 **{acc['name']}** — {status}\nTotal Groups: `{len(groups)}`\n\n"
-
             if not groups:
                 await event.respond(header + "_No groups found._", buttons=[[Button.inline("« Back", back_cb)]])
                 return
-
             chunks = [groups[i:i + 20] for i in range(0, len(groups), 20)]
             for i, chunk in enumerate(chunks):
                 head = header if i == 0 else f"Page {i+1}/{len(chunks)}\n\n"
                 btns = [[Button.inline("« Back", back_cb)]] if i == len(chunks) - 1 else None
                 await event.respond(head + "\n\n".join(chunk), buttons=btns)
 
+    # ─────────────────────────────────────────
+    #  Message handler
+    # ─────────────────────────────────────────
     @bot.on(events.NewMessage(func=lambda e: e.is_private))
     async def on_msg(event):
-        uid = event.sender_id
+        uid  = event.sender_id
         text = event.raw_text.strip()
 
         if text.startswith("/"):
             return
-
         if uid not in user_state:
             return
 
         step = user_state[uid]["step"]
-        cfg = load_cfg()
+        cfg  = load_cfg()
 
+        # ── Interval ──────────────────────────
         if step == "interval":
             if not text.isdigit():
                 await event.respond("⚠️ Enter a valid number.")
                 return
-
             cfg["interval"] = int(text)
             save_cfg(cfg)
             user_state.pop(uid, None)
             await event.respond(f"✅ Interval set to `{text} sec`")
 
+        # ── Add Subscriber ────────────────────
         elif step == "add_sub":
             parts = text.split()
             if len(parts) != 2 or not parts[1].isdigit():
                 await event.respond("Format: `@username LIMIT`\nExample: `@rahul123 5`")
                 return
-
             username = parts[0].lstrip("@")
-            limit = int(parts[1])
-
+            limit    = int(parts[1])
             try:
                 user = await bot.get_entity(username)
             except Exception:
-                await event.respond(
-                    f"❌ `@{username}` not found.\n"
-                    f"Make sure the username is correct and they have started the bot."
-                )
+                await event.respond(f"❌ `@{username}` not found.")
                 return
-
             t_id = str(user.id)
             if t_id in cfg["users"]:
                 await event.respond(f"⚠️ `@{username}` is already a subscriber.")
                 user_state.pop(uid, None)
                 return
-
             cfg["users"][t_id] = {"username": username, "limit": limit}
             save_cfg(cfg)
             user_state.pop(uid, None)
             await event.respond(f"✅ Subscriber added!\n\n👤 @{username}\n🆔 `{t_id}`\n📊 Limit: `{limit}` accounts")
 
         # ── Phone ─────────────────────────────
+        # Copied exactly from working script — simple connect + send_code_request
         elif step == "phone":
-            if not text.startswith("+"):
+            phone = text
+            if not phone.startswith("+"):
                 await event.respond("⚠️ Format: `+919876543210`")
                 return
 
-            if uid in user_state:
-                await cleanup_user_state(uid)
+            label  = f"acc_{uid}_{int(time.time())}"
+            client = TelegramClient(f"session_{label}", API_ID, API_HASH)
 
-            label        = f"acc_{uid}_{int(time.time())}"
-            session_path = f"session_{label}"
-
-            # ✅ File-based session — DC info survives any reconnect
-            client = TelegramClient(session_path, API_ID, API_HASH)
+            await client.connect()
 
             try:
-                await client.connect()
-                result = await client.send_code_request(text)
+                result = await client.send_code_request(phone)
+            except FloodWaitError as e:
+                await event.respond(f"⚠️ Too many OTP requests. Wait {e.seconds // 60} min.")
+                await client.disconnect()
+                return
             except Exception as e:
-                await event.respond(f"❌ Failed to send OTP: `{e}`")
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
+                await event.respond(f"❌ Error: `{e}`")
+                await client.disconnect()
                 return
 
             user_state[uid] = {
-                "step":         "otp",
-                "client":       client,
-                "phone":        text,
-                "hash":         result.phone_code_hash,
-                "label":        label,
-                "session_path": session_path,
-                "otp_tries":    0,
-                "twofa_tries":  0,
+                "step":   "otp",
+                "client": client,
+                "phone":  phone,
+                "hash":   result.phone_code_hash,
+                "label":  label,
             }
 
-            await event.respond(
-                "✉️ OTP sent.\n"
-                "Enter it FAST — expires in ~2 min.\n"
-                "Use /cancel to stop."
-            )
+            await event.respond("✉️ Send OTP:")
 
         # ── OTP ───────────────────────────────
+        # Copied exactly from working script — no reconnect tricks
         elif step == "otp":
-            st     = user_state[uid]
-            client = st["client"]
-
-            if not client.is_connected():
-                await client.connect()
-
-            st["otp_tries"] += 1
-
-            if st["otp_tries"] > MAX_OTP_TRIES:
-                await event.respond("❌ Too many failed attempts. Start again.")
-                await cleanup_user_state(uid)
-                return
+            s      = user_state[uid]
+            client = s["client"]
 
             try:
                 await client.sign_in(
-                    st["phone"],
-                    text,
-                    phone_code_hash=st["hash"],
+                    phone=s["phone"],
+                    code=text,
+                    phone_code_hash=s["hash"],
                 )
 
-            except PhoneCodeInvalidError:
-                left = MAX_OTP_TRIES - st["otp_tries"]
-                await event.respond(f"❌ Wrong OTP. Attempts left: `{left}`")
-                return
+                me = await client.get_me()
 
-            except PhoneCodeExpiredError:
-                # ✅ Don't auto-resend — tell user to restart cleanly
-                await event.respond(
-                    "❌ OTP expired.\n\n"
-                    "Wait 60 sec, then press ➕ Add Account again.\n"
-                    "Enter the OTP as soon as you receive it."
-                )
-                await cleanup_user_state(uid)
-                return
+                try:
+                    logs   = await client(CreateChannelRequest(title=f"{me.first_name} Logs", about="Activity logs", megagroup=False))
+                    log_ch = logs.chats[0].id
+                except Exception:
+                    log_ch = None
+
+                # ✅ Disconnect after login — exactly like working script
+                await client.disconnect()
+
+                cfg["accounts"][s["label"]] = {
+                    "session": f"session_{s['label']}",
+                    "name":    me.first_name or "Unknown",
+                    "owner":   uid,
+                    "logs":    log_ch,
+                }
+                save_cfg(cfg)
+                user_state.pop(uid, None)
+                await event.respond(f"✅ Account **{me.first_name}** added!")
 
             except SessionPasswordNeededError:
-                st["step"] = "2fa"
-                await event.respond("🔐 Enter 2FA password:\nUse /cancel to stop.")
-                return
+                user_state[uid]["step"] = "2fa"
+                await event.respond("🔐 Send 2FA password:")
+
+            except PhoneCodeInvalidError:
+                await event.respond("❌ Wrong OTP. Try again:")
+
+            except PhoneCodeExpiredError:
+                await client.disconnect()
+                user_state.pop(uid, None)
+                await event.respond("❌ OTP expired. Press ➕ Add Account and try again.")
 
             except Exception as e:
+                await client.disconnect()
+                user_state.pop(uid, None)
                 await event.respond(f"❌ Error: `{e}`")
-                await cleanup_user_state(uid)
-                return
-
-            await finish_add(event, uid, client, load_cfg())
 
         # ── 2FA ───────────────────────────────
+        # Copied exactly from working script
         elif step == "2fa":
-            st     = user_state[uid]
-            client = st["client"]
-
-            if not client.is_connected():
-                await client.connect()
-
-            st["twofa_tries"] += 1
-
-            if st["twofa_tries"] > MAX_2FA_TRIES:
-                await event.respond("❌ Too many wrong 2FA attempts. Start again.")
-                await cleanup_user_state(uid)
-                return
+            s      = user_state[uid]
+            client = s["client"]
 
             try:
                 await client.sign_in(password=text)
-            except Exception:
-                left = MAX_2FA_TRIES - st["twofa_tries"]
-                await event.respond(f"❌ Wrong password. Attempts left: `{left}`")
-                return
 
-            await finish_add(event, uid, client, load_cfg())
+                me = await client.get_me()
 
-    async def finish_add(event, uid: int, client: TelegramClient, cfg: dict):
-        if uid not in user_state:
-            await event.respond("❌ Session state missing. Start again.")
-            try:
+                try:
+                    logs   = await client(CreateChannelRequest(title=f"{me.first_name} Logs", about="Activity logs", megagroup=False))
+                    log_ch = logs.chats[0].id
+                except Exception:
+                    log_ch = None
+
+                # ✅ Disconnect after login — exactly like working script
                 await client.disconnect()
-            except Exception:
-                pass
-            return
 
-        st           = user_state[uid]
-        label        = st["label"]
-        session_path = st["session_path"]
+                cfg["accounts"][s["label"]] = {
+                    "session": f"session_{s['label']}",
+                    "name":    me.first_name or "Unknown",
+                    "owner":   uid,
+                    "logs":    log_ch,
+                }
+                save_cfg(cfg)
+                user_state.pop(uid, None)
+                await event.respond(f"✅ Account **{me.first_name}** added!")
 
-        try:
-            me = await client.get_me()
-
-            try:
-                logs = await client(
-                    CreateChannelRequest(
-                        title=f"{(me.first_name or 'User')} Logs",
-                        about="Activity logs",
-                        megagroup=False,
-                    )
-                )
-                log_ch = logs.chats[0].id
-            except Exception:
-                log_ch = None
-
-            # ✅ Telethon already saved the session to file — just register in pool
-            client_pool[session_path] = client
-
-            cfg["accounts"][label] = {
-                "session": session_path,
-                "name":    me.first_name or "Unknown",
-                "owner":   uid,
-                "logs":    log_ch,
-            }
-            save_cfg(cfg)
-
-            user_state.pop(uid, None)
-            await event.respond(f"✅ Account **{me.first_name or 'Unknown'}** added successfully!")
-
-        except Exception as e:
-            await event.respond(f"❌ Failed to finish account setup: `{e}`")
-            await cleanup_user_state(uid)
+            except Exception as e:
+                await event.respond(f"❌ 2FA failed: `{e}`")
 
     await bot.run_until_disconnected()
 

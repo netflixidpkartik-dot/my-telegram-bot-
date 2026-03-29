@@ -17,10 +17,9 @@ from telethon.tl.functions.channels import CreateChannelRequest
 # =========================
 # CONFIG
 # =========================
-BOT_TOKEN = os.getenv("8612619704:AAHJlA-FTkHwJQ8NY1eCJbEahN0iqAXinfA")
-API_ID = int(os.getenv("39079240"))
-API_HASH = os.getenv("4965548c91f559cd2ce88d00fcc54db1")
-
+BOT_TOKEN = "8612619704:AAHJlA-FTkHwJQ8NY1eCJbEahN0iqAXinfA" 
+API_ID = 39079240
+API_HASH = "4965548c91f559cd2ce88d00fcc54db1"
 CONFIG = "accounts.json"
 
 DEFAULT_INTERVAL = 90

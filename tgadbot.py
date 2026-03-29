@@ -2,6 +2,7 @@ import asyncio
 import json
 import random
 import re
+import time
 
 from telethon import TelegramClient, events, Button
 from telethon.errors import (
@@ -15,7 +16,7 @@ from telethon.tl.functions.channels import CreateChannelRequest
 
 
 # =========================
-# DIRECT CONFIG (NO ENV)
+# DIRECT CONFIG
 # =========================
 BOT_TOKEN = "8612619704:AAHJlA-FTkHwJQ8NY1eCJbEahN0iqAXinfA" 
 API_ID = 39079240
@@ -26,7 +27,7 @@ if not BOT_TOKEN or not API_HASH:
 
 
 # =========================
-# FILES / GLOBALS
+# GLOBALS
 # =========================
 CONFIG = "accounts.json"
 DEFAULT_INTERVAL = 90
@@ -36,9 +37,14 @@ state = {}
 account_tasks = {}
 cfg_lock = asyncio.Lock()
 
+# anti double click / anti duplicate callback
+user_locks = {}
+last_click = {}
+dashboard_message_id = None
+
 
 # =========================
-# CONFIG HELPERS
+# CONFIG
 # =========================
 def load_cfg():
     try:
@@ -55,38 +61,10 @@ async def save_cfg(data):
 
 
 # =========================
-# UI
+# HELPERS
 # =========================
-def dashboard_buttons():
-    return [
-        [Button.inline("➕ Add Account", b"add")],
-        [Button.inline("📂 Accounts", b"accs"), Button.inline("❌ Remove", b"del")],
-        [Button.inline("▶ Start Ads", b"start"), Button.inline("⏹ Stop Ads", b"stop")],
-        [Button.inline("⏱ Set Interval", b"interval")],
-        [Button.inline("♻ Refresh", b"refresh")]
-    ]
-
-
-async def send_dashboard(event, text="Ads Dashboard Ready"):
-    await event.respond(text, buttons=dashboard_buttons())
-
-
 def is_owner(uid: int):
     return uid == OWNER_ID
-
-
-# =========================
-# ACCOUNT HELPERS
-# =========================
-async def create_logs_channel(client, label):
-    result = await client(
-        CreateChannelRequest(
-            title=f"{label} Logs",
-            about="Account logs",
-            megagroup=False
-        )
-    )
-    return result.chats[0].id
 
 
 def sanitize_phone(phone: str):
@@ -103,6 +81,53 @@ def make_label(cfg):
     while f"acc{i}" in existing:
         i += 1
     return f"acc{i}"
+
+
+def dashboard_buttons():
+    return [
+        [Button.inline("➕ Add Account", b"add")],
+        [Button.inline("📂 Accounts", b"accs"), Button.inline("❌ Remove", b"del")],
+        [Button.inline("▶ Start Ads", b"start"), Button.inline("⏹ Stop Ads", b"stop")],
+        [Button.inline("⏱ Set Interval", b"interval")],
+        [Button.inline("♻ Refresh", b"refresh")]
+    ]
+
+
+async def send_or_edit_dashboard(event, text="Ads Dashboard Ready"):
+    global dashboard_message_id
+
+    try:
+        if dashboard_message_id:
+            await event.client.edit_message(
+                event.chat_id,
+                dashboard_message_id,
+                text,
+                buttons=dashboard_buttons()
+            )
+        else:
+            msg = await event.respond(text, buttons=dashboard_buttons())
+            dashboard_message_id = msg.id
+    except:
+        msg = await event.respond(text, buttons=dashboard_buttons())
+        dashboard_message_id = msg.id
+
+
+async def safe_reply(event, text, buttons=None):
+    try:
+        return await event.respond(text, buttons=buttons)
+    except:
+        return None
+
+
+async def create_logs_channel(client, label):
+    result = await client(
+        CreateChannelRequest(
+            title=f"{label} Logs",
+            about="Account logs",
+            megagroup=False
+        )
+    )
+    return result.chats[0].id
 
 
 # =========================
@@ -224,11 +249,9 @@ async def begin_login(uid, phone):
     cfg = load_cfg()
     label = make_label(cfg)
 
-    # block duplicate pending login
-    if uid in state and state[uid].get("step") in ["otp", "2fa", "phone"]:
+    if uid in state and state[uid].get("step") in ["otp", "2fa", "phone", "interval"]:
         return False, "A login flow is already active. Finish it first."
 
-    # block same phone duplicate add
     for _, acc in cfg["accounts"].items():
         if acc.get("phone") == phone:
             return False, "This phone/account is already added."
@@ -238,7 +261,6 @@ async def begin_login(uid, phone):
     try:
         await client.connect()
 
-        # OTP ONLY ONCE
         result = await client.send_code_request(phone)
 
         await client.disconnect()
@@ -402,7 +424,7 @@ async def run_bot():
     async def start_cmd(event):
         if not is_owner(event.sender_id):
             return
-        await send_dashboard(event)
+        await send_or_edit_dashboard(event)
 
     @bot.on(events.CallbackQuery)
     async def callback(event):
@@ -412,68 +434,79 @@ async def run_bot():
             await event.answer("Unauthorized", alert=True)
             return
 
-        data = event.data.decode()
+        # anti duplicate tap
+        now = time.time()
+        last = last_click.get(uid, 0)
 
-        # acknowledge callback immediately
-        await event.answer()
+        if now - last < 1.2:
+            await event.answer("Wait...", alert=False)
+            return
 
-        cfg = load_cfg()
+        last_click[uid] = now
 
-        if data == "refresh":
-            await send_dashboard(event, "Dashboard refreshed.")
+        if uid not in user_locks:
+            user_locks[uid] = asyncio.Lock()
 
-        elif data == "start":
-            await start_accounts()
-            await send_dashboard(event, "Ads started.")
+        async with user_locks[uid]:
+            data = event.data.decode()
+            await event.answer()
 
-        elif data == "stop":
-            await stop_accounts()
-            await send_dashboard(event, "Ads stopped.")
+            cfg = load_cfg()
 
-        elif data == "interval":
-            state[uid] = {"step": "interval"}
-            await event.respond("Send interval in seconds.\nExample: 90")
+            if data == "refresh":
+                await send_or_edit_dashboard(event, "Dashboard refreshed.")
 
-        elif data == "accs":
-            if not cfg["accounts"]:
-                await event.respond("No accounts added yet.")
-                return
+            elif data == "start":
+                await start_accounts()
+                await send_or_edit_dashboard(event, "Ads started.")
 
-            txt = "Accounts:\n\n"
-            for label, acc in cfg["accounts"].items():
-                txt += f"{label} → {acc['name']} ({acc.get('phone', 'NoPhone')})\n"
+            elif data == "stop":
+                await stop_accounts()
+                await send_or_edit_dashboard(event, "Ads stopped.")
 
-            await event.respond(txt)
+            elif data == "interval":
+                state[uid] = {"step": "interval"}
+                await safe_reply(event, "Send interval in seconds.\nExample: 90")
 
-        elif data == "add":
-            # clear old broken flow
-            if uid in state:
-                del state[uid]
+            elif data == "accs":
+                if not cfg["accounts"]:
+                    await safe_reply(event, "No accounts added yet.")
+                    return
 
-            state[uid] = {"step": "phone"}
-            await event.respond("Send phone number with country code.\nExample: +919876543210")
+                txt = "Accounts:\n\n"
+                for label, acc in cfg["accounts"].items():
+                    txt += f"{label} → {acc['name']} ({acc.get('phone', 'NoPhone')})\n"
 
-        elif data == "del":
-            if not cfg["accounts"]:
-                await event.respond("No accounts to remove.")
-                return
+                await safe_reply(event, txt)
 
-            buttons = []
-            for label, acc in cfg["accounts"].items():
-                buttons.append(
-                    [Button.inline(f"{acc['name']} ({label})", f"del_{label}".encode())]
-                )
+            elif data == "add":
+                if uid in state:
+                    del state[uid]
 
-            await event.respond("Select account to remove:", buttons=buttons)
+                state[uid] = {"step": "phone"}
+                await safe_reply(event, "Send phone number with country code.\nExample: +919876543210")
 
-        elif data.startswith("del_"):
-            label = data.replace("del_", "")
+            elif data == "del":
+                if not cfg["accounts"]:
+                    await safe_reply(event, "No accounts to remove.")
+                    return
 
-            if label in cfg["accounts"]:
-                await stop_single_account(label)
-                del cfg["accounts"][label]
-                await save_cfg(cfg)
-                await event.respond(f"{label} removed successfully.")
+                buttons = []
+                for label, acc in cfg["accounts"].items():
+                    buttons.append(
+                        [Button.inline(f"{acc['name']} ({label})", f"del_{label}".encode())]
+                    )
+
+                await safe_reply(event, "Select account to remove:", buttons=buttons)
+
+            elif data.startswith("del_"):
+                label = data.replace("del_", "")
+
+                if label in cfg["accounts"]:
+                    await stop_single_account(label)
+                    del cfg["accounts"][label]
+                    await save_cfg(cfg)
+                    await safe_reply(event, f"{label} removed successfully.")
 
     @bot.on(events.NewMessage)
     async def handler(event):
@@ -495,7 +528,7 @@ async def run_bot():
             try:
                 val = int(text)
                 if val < 10:
-                    await event.respond("Too low. Keep interval at least 10 seconds.")
+                    await safe_reply(event, "Too low. Keep interval at least 10 seconds.")
                     return
 
                 cfg = load_cfg()
@@ -503,21 +536,21 @@ async def run_bot():
                 await save_cfg(cfg)
 
                 del state[uid]
-                await event.respond(f"Interval updated to {val} seconds.")
-                await send_dashboard(event)
+                await safe_reply(event, f"Interval updated to {val} seconds.")
+                await send_or_edit_dashboard(event)
 
             except:
-                await event.respond("Send a valid number.\nExample: 90")
+                await safe_reply(event, "Send a valid number.\nExample: 90")
 
         elif step == "phone":
             phone = sanitize_phone(text)
 
             if not re.fullmatch(r"\+\d{8,15}", phone):
-                await event.respond("Invalid phone format.\nExample: +919876543210")
+                await safe_reply(event, "Invalid phone format.\nExample: +919876543210")
                 return
 
             ok, msg = await begin_login(uid, phone)
-            await event.respond(msg)
+            await safe_reply(event, msg)
 
             if not ok:
                 if uid in state and state[uid].get("step") == "phone":
@@ -525,17 +558,17 @@ async def run_bot():
 
         elif step == "otp":
             ok, msg = await complete_login_with_otp(uid, text)
-            await event.respond(msg)
+            await safe_reply(event, msg)
 
             if ok:
-                await send_dashboard(event)
+                await send_or_edit_dashboard(event)
 
         elif step == "2fa":
             ok, msg = await complete_login_with_2fa(uid, text)
-            await event.respond(msg)
+            await safe_reply(event, msg)
 
             if ok:
-                await send_dashboard(event)
+                await send_or_edit_dashboard(event)
 
     await bot.run_until_disconnected()
 

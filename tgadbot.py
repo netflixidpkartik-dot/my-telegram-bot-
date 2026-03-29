@@ -18,7 +18,7 @@ from telethon.tl.functions.channels import CreateChannelRequest
 # =========================
 # DIRECT CONFIG
 # =========================
-BOT_TOKEN = "8612619704:AAHJlA-FTkHwJQ8NY1eCJbEahN0iqAXinfA" 
+BOT_TOKEN = "8612619704:AAHJlA-FTkHwJQ8NY1eCJbEahN0iqAXinfA"
 API_ID = 39079240
 API_HASH = "4965548c91f559cd2ce88d00fcc54db1"
 OWNER_ID = 8310064844
@@ -417,7 +417,6 @@ async def complete_login_with_2fa(uid, password):
 async def run_bot():
     bot = TelegramClient("bot_session", API_ID, API_HASH)
 
-    # IMPORTANT FIX: handle bot auth flood wait
     while True:
         try:
             await bot.start(bot_token=BOT_TOKEN)
@@ -443,19 +442,23 @@ async def run_bot():
             await event.answer("Unauthorized", alert=True)
             return
 
-        now = time.time()
-        last = last_click.get(uid, 0)
-
-        if now - last < 1.2:
-            await event.answer("Wait...", alert=False)
-            return
-
-        last_click[uid] = now
-
+        # Create lock per user if not exists
         if uid not in user_locks:
             user_locks[uid] = asyncio.Lock()
 
+        # ✅ FIX: time check is INSIDE the lock — atomic check+update
+        # prevents double-trigger race condition where two events
+        # both pass the check before either one updates last_click
         async with user_locks[uid]:
+            now = time.time()
+            last = last_click.get(uid, 0)
+
+            if now - last < 1.2:
+                await event.answer("Wait...", alert=False)
+                return
+
+            last_click[uid] = now  # update immediately inside lock
+
             data = event.data.decode()
             await event.answer()
 

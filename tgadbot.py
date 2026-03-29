@@ -3,7 +3,7 @@ import json
 import os
 import random
 import re
-from dotenv import load_dotenv
+
 
 from telethon import TelegramClient, events, Button
 from telethon.errors import (
@@ -18,7 +18,7 @@ from telethon.tl.functions.channels import CreateChannelRequest
 # =========================
 # LOAD ENV
 # =========================
-load_dotenv()
+
 BOT_TOKEN = "8612619704:AAHJlA-FTkHwJQ8NY1eCJbEahN0iqAXinfA" 
 API_ID = 39079240
 API_HASH = "4965548c91f559cd2ce88d00fcc54db1"

@@ -22,6 +22,7 @@ BOT_TOKEN = "8612619704:AAHJlA-FTkHwJQ8NY1eCJbEahN0iqAXinfA"
 API_ID = 39079240
 API_HASH = "4965548c91f559cd2ce88d00fcc54db1"
 OWNER_ID = 8310064844
+
 if not BOT_TOKEN or not API_HASH:
     raise ValueError("Missing credentials")
 
@@ -37,7 +38,6 @@ state = {}
 account_tasks = {}
 cfg_lock = asyncio.Lock()
 
-# anti double click / anti duplicate callback
 user_locks = {}
 last_click = {}
 dashboard_message_id = None
@@ -416,7 +416,16 @@ async def complete_login_with_2fa(uid, password):
 # =========================
 async def run_bot():
     bot = TelegramClient("bot_session", API_ID, API_HASH)
-    await bot.start(bot_token=BOT_TOKEN)
+
+    # IMPORTANT FIX: handle bot auth flood wait
+    while True:
+        try:
+            await bot.start(bot_token=BOT_TOKEN)
+            break
+        except FloodWaitError as e:
+            wait_time = e.seconds + 5
+            print(f"[BOT FLOOD WAIT] Waiting {wait_time} seconds before retry...")
+            await asyncio.sleep(wait_time)
 
     print("[+] Bot started successfully")
 
@@ -434,7 +443,6 @@ async def run_bot():
             await event.answer("Unauthorized", alert=True)
             return
 
-        # anti duplicate tap
         now = time.time()
         last = last_click.get(uid, 0)
 

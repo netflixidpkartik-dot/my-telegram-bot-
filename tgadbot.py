@@ -1,9 +1,7 @@
 import asyncio
 import json
-import os
 import random
 import re
-
 
 from telethon import TelegramClient, events, Button
 from telethon.errors import (
@@ -15,25 +13,16 @@ from telethon.errors import (
 )
 from telethon.tl.functions.channels import CreateChannelRequest
 
-# =========================
-# LOAD ENV
-# =========================
 
+# =========================
+# DIRECT CONFIG (NO ENV)
+# =========================
 BOT_TOKEN = "8612619704:AAHJlA-FTkHwJQ8NY1eCJbEahN0iqAXinfA" 
 API_ID = 39079240
 API_HASH = "4965548c91f559cd2ce88d00fcc54db1"
+if not BOT_TOKEN or not API_HASH:
+    raise ValueError("Missing credentials")
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN missing")
-if not API_ID_RAW:
-    raise ValueError("API_ID missing")
-if not API_HASH:
-    raise ValueError("API_HASH missing")
-if not OWNER_ID_RAW:
-    raise ValueError("OWNER_ID missing")
-
-API_ID = int(API_ID_RAW)
-OWNER_ID = int(OWNER_ID_RAW)
 
 # =========================
 # FILES / GLOBALS
@@ -42,8 +31,8 @@ CONFIG = "accounts.json"
 DEFAULT_INTERVAL = 90
 CYCLE_DELAY = 60
 
-state = {}          # user state
-account_tasks = {}  # running tasks
+state = {}
+account_tasks = {}
 cfg_lock = asyncio.Lock()
 
 
@@ -51,13 +40,11 @@ cfg_lock = asyncio.Lock()
 # CONFIG HELPERS
 # =========================
 def load_cfg():
-    if os.path.exists(CONFIG):
-        try:
-            with open(CONFIG, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            return {"accounts": {}, "interval": DEFAULT_INTERVAL}
-    return {"accounts": {}, "interval": DEFAULT_INTERVAL}
+    try:
+        with open(CONFIG, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {"accounts": {}, "interval": DEFAULT_INTERVAL}
 
 
 async def save_cfg(data):
@@ -102,8 +89,7 @@ async def create_logs_channel(client, label):
 
 
 def sanitize_phone(phone: str):
-    phone = phone.strip().replace(" ", "")
-    return phone
+    return phone.strip().replace(" ", "")
 
 
 def sanitize_otp(otp: str):
@@ -111,7 +97,11 @@ def sanitize_otp(otp: str):
 
 
 def make_label(cfg):
-    return f"acc{len(cfg['accounts']) + 1}"
+    existing = cfg["accounts"].keys()
+    i = 1
+    while f"acc{i}" in existing:
+        i += 1
+    return f"acc{i}"
 
 
 # =========================
@@ -154,31 +144,43 @@ async def broadcast_account_loop(label, acc):
 
                         success += 1
 
-                        await client.send_message(
-                            acc["log_channel"],
-                            f"Sent → {dialog.name}"
-                        )
+                        try:
+                            await client.send_message(
+                                acc["log_channel"],
+                                f"Sent → {dialog.name}"
+                            )
+                        except:
+                            pass
 
                         await asyncio.sleep(random.randint(interval, interval + 30))
 
                     except FloodWaitError as e:
-                        await client.send_message(
-                            acc["log_channel"],
-                            f"Flood wait {e.seconds}s"
-                        )
+                        try:
+                            await client.send_message(
+                                acc["log_channel"],
+                                f"Flood wait {e.seconds}s"
+                            )
+                        except:
+                            pass
                         await asyncio.sleep(e.seconds)
 
                     except Exception as ex:
                         failed += 1
-                        await client.send_message(
-                            acc["log_channel"],
-                            f"Failed → {dialog.name}\nReason: {str(ex)}"
-                        )
+                        try:
+                            await client.send_message(
+                                acc["log_channel"],
+                                f"Failed → {dialog.name}\nReason: {str(ex)}"
+                            )
+                        except:
+                            pass
 
-                await client.send_message(
-                    acc["log_channel"],
-                    f"Cycle done\nSuccess: {success}\nFailed: {failed}"
-                )
+                try:
+                    await client.send_message(
+                        acc["log_channel"],
+                        f"Cycle done\nSuccess: {success}\nFailed: {failed}"
+                    )
+                except:
+                    pass
 
                 await asyncio.sleep(CYCLE_DELAY)
 
@@ -215,13 +217,9 @@ async def stop_single_account(label):
 
 
 # =========================
-# LOGIN FLOW HELPERS
+# LOGIN FLOW
 # =========================
 async def begin_login(uid, phone):
-    """
-    SINGLE source of truth for OTP request.
-    This is the main fix.
-    """
     cfg = load_cfg()
     label = make_label(cfg)
 
@@ -229,13 +227,17 @@ async def begin_login(uid, phone):
     if uid in state and state[uid].get("step") in ["otp", "2fa", "phone"]:
         return False, "A login flow is already active. Finish it first."
 
+    # block same phone duplicate add
+    for _, acc in cfg["accounts"].items():
+        if acc.get("phone") == phone:
+            return False, "This phone/account is already added."
+
     client = TelegramClient(f"session_{label}", API_ID, API_HASH)
 
     try:
         await client.connect()
 
-        # IMPORTANT:
-        # send code ONLY ONCE
+        # OTP ONLY ONCE
         result = await client.send_code_request(phone)
 
         await client.disconnect()
@@ -245,7 +247,6 @@ async def begin_login(uid, phone):
             "phone": phone,
             "hash": result.phone_code_hash,
             "label": label,
-            "otp_sent": True,
         }
 
         return True, f"OTP sent to {phone}\n\nNow send OTP digits only."
@@ -329,7 +330,6 @@ async def complete_login_with_otp(uid, otp):
         except:
             pass
 
-        # delete broken flow so user can restart cleanly
         del state[uid]
         return False, "OTP expired. Start again from Add Account."
 
@@ -395,7 +395,7 @@ async def run_bot():
     bot = TelegramClient("bot_session", API_ID, API_HASH)
     await bot.start(bot_token=BOT_TOKEN)
 
-    print("[+] Bot started")
+    print("[+] Bot started successfully")
 
     @bot.on(events.NewMessage(pattern="/start"))
     async def start_cmd(event):
@@ -413,7 +413,6 @@ async def run_bot():
 
         data = event.data.decode()
 
-        # IMPORTANT:
         # acknowledge callback immediately
         await event.answer()
 
@@ -446,7 +445,7 @@ async def run_bot():
             await event.respond(txt)
 
         elif data == "add":
-            # clear any broken old state first
+            # clear old broken flow
             if uid in state:
                 del state[uid]
 
@@ -460,7 +459,9 @@ async def run_bot():
 
             buttons = []
             for label, acc in cfg["accounts"].items():
-                buttons.append([Button.inline(f"{acc['name']} ({label})", f"del_{label}".encode())])
+                buttons.append(
+                    [Button.inline(f"{acc['name']} ({label})", f"del_{label}".encode())]
+                )
 
             await event.respond("Select account to remove:", buttons=buttons)
 
@@ -480,7 +481,6 @@ async def run_bot():
         if not is_owner(uid):
             return
 
-        # ignore commands
         if event.raw_text.startswith("/"):
             return
 
@@ -490,7 +490,6 @@ async def run_bot():
         step = state[uid].get("step")
         text = event.raw_text.strip()
 
-        # INTERVAL STEP
         if step == "interval":
             try:
                 val = int(text)
@@ -509,7 +508,6 @@ async def run_bot():
             except:
                 await event.respond("Send a valid number.\nExample: 90")
 
-        # PHONE STEP
         elif step == "phone":
             phone = sanitize_phone(text)
 
@@ -520,12 +518,10 @@ async def run_bot():
             ok, msg = await begin_login(uid, phone)
             await event.respond(msg)
 
-            # if failed, reset phone state
             if not ok:
                 if uid in state and state[uid].get("step") == "phone":
                     del state[uid]
 
-        # OTP STEP
         elif step == "otp":
             ok, msg = await complete_login_with_otp(uid, text)
             await event.respond(msg)
@@ -533,7 +529,6 @@ async def run_bot():
             if ok:
                 await send_dashboard(event)
 
-        # 2FA STEP
         elif step == "2fa":
             ok, msg = await complete_login_with_2fa(uid, text)
             await event.respond(msg)

@@ -18,10 +18,10 @@ from telethon.tl.functions.channels import CreateChannelRequest
 # =========================
 # DIRECT CONFIG
 # =========================
-BOT_TOKEN = "8612619704:AAHJlA-FTkHwJQ8NY1eCJbEahN0iqAXinfA"
-API_ID = 39079240
-API_HASH = "4965548c91f559cd2ce88d00fcc54db1"
-OWNER_ID = 8310064844
+BOT_TOKEN = "8669659434:AAH6OkckVZi3bQJxNFUl4MFB9gE93PsMTgE"
+API_ID = 31835666
+API_HASH = "0dbaf6ce2f55c5897b6f6c31a5b376a9"
+OWNER_ID = 6633439264
 
 if not BOT_TOKEN or not API_HASH:
     raise ValueError("Missing credentials")

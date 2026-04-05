@@ -32,9 +32,9 @@ from telethon.errors import SessionPasswordNeededError, AuthRestartError
 #  CONFIG
 # ─────────────────────────────────────────────
 
-BOT_TOKEN        = "8238694441:AAHT0lckdea6RRWATGtrMsucLZbq0E22G0A"
-SHARED_API_ID    = YOUR_API_ID  # my.telegram.org se lo
-SHARED_API_HASH  = "YOUR_API_HASH"  # my.telegram.org se lo
+BOT_TOKEN        = "8795703126:AAEewaOYxC2VSMcIIevSb_-whJTg85Y-mtI"
+SHARED_API_ID    = 35974406  # my.telegram.org se lo
+SHARED_API_HASH  = "2dd6073296c2a809927a61050ba73e91"  # my.telegram.org se lo
 REST_HOURS       = 6
 REST_DURATION    = 1
 DEFAULT_INTERVAL = 30

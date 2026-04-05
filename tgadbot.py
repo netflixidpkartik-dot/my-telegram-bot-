@@ -1,588 +1,474 @@
+⚠️  IMPORTANT — APNA API ID/HASH DAALO
+# 1. my.telegram.org pe jao
+# 2. Login karo
+# 3. API Development Tools → Create App
+# 4. api_id aur api_hash copy karo → neeche daalo
+#
+# ⚠️  RAILWAY PE MAT CHALAO — APNE PC PE CHALAO
+# CMD mein: python tg_broadcaster_dash.py
+#
+"""
+Telegram Group Broadcaster — Railway Safe Edition
+- String sessions saved in Telegram Saved Messages (survives Railway restart!)
+- Inline button dashboard
+- Add accounts with phone + OTP only
+- Parallel broadcasting
+- 6hr on / 1hr rest cycle
+
+Requirements:
+    pip install telethon
+"""
+
 import asyncio
 import json
-import random
-import re
-import time
-
+import os
+from datetime import datetime
 from telethon import TelegramClient, events, Button
-from telethon.errors import (
-    FloodWaitError,
-    SessionPasswordNeededError,
-    PhoneCodeInvalidError,
-    PhoneCodeExpiredError,
-    PasswordHashInvalidError,
-)
-from telethon.tl.functions.channels import CreateChannelRequest
+from telethon.sessions import StringSession
+from telethon.tl.types import Channel, Chat
+from telethon.errors import SessionPasswordNeededError, AuthRestartError
 
+# ─────────────────────────────────────────────
+#  CONFIG
+# ─────────────────────────────────────────────
 
-# =========================
-# DIRECT CONFIG
-# =========================
-BOT_TOKEN = "8669659434:AAH6OkckVZi3bQJxNFUl4MFB9gE93PsMTgE"
-API_ID = 31835666
-API_HASH = "0dbaf6ce2f55c5897b6f6c31a5b376a9"
-OWNER_ID = 6633439264
+BOT_TOKEN        = "8238694441:AAHT0lckdea6RRWATGtrMsucLZbq0E22G0A"
+SHARED_API_ID    = YOUR_API_ID  # my.telegram.org se lo
+SHARED_API_HASH  = "YOUR_API_HASH"  # my.telegram.org se lo
+REST_HOURS       = 6
+REST_DURATION    = 1
+DEFAULT_INTERVAL = 30
+CONFIG_FILE      = "dash_config.json"
+LOGS_DIR         = "logs"
+CONFIG_BACKUP_TAG = "#BROADCASTER_CONFIG_BACKUP"
+os.makedirs(LOGS_DIR, exist_ok=True)
 
-if not BOT_TOKEN or not API_HASH:
-    raise ValueError("Missing credentials")
+# ─── In-memory config (no file dependency) ───
+_config = None
 
+def default_config():
+    return {
+        "owner_id": 0,
+        "accounts": {},
+        "interval": DEFAULT_INTERVAL,
+        "broadcasting": False,
+    }
 
-# =========================
-# GLOBALS
-# =========================
-CONFIG = "accounts.json"
-DEFAULT_INTERVAL = 90
-CYCLE_DELAY = 60
+def load_config():
+    global _config
+    if _config is not None:
+        return _config
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                _config = json.load(f)
+            return _config
+        except Exception:
+            pass
+    _config = default_config()
+    return _config
 
-state = {}
-account_tasks = {}
-cfg_lock = asyncio.Lock()
-
-user_locks = {}
-last_click = {}
-dashboard_message_id = None
-
-
-# =========================
-# CONFIG
-# =========================
-def load_cfg():
+def save_config(cfg):
+    global _config
+    _config = cfg
     try:
-        with open(CONFIG, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {"accounts": {}, "interval": DEFAULT_INTERVAL}
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        pass
 
+async def backup_config_to_telegram(bot, cfg):
+    """Backup config to bot's saved messages so it survives Railway restart."""
+    try:
+        owner_id = cfg.get("owner_id", 0)
+        if not owner_id:
+            return
+        # Make a safe copy without large data
+        backup = json.dumps(cfg)
+        msg_text = f"{CONFIG_BACKUP_TAG}\n{backup}"
+        # Delete old backup first
+        async for msg in bot.iter_messages("me", search=CONFIG_BACKUP_TAG):
+            await msg.delete()
+            break
+        await bot.send_message("me", msg_text)
+    except Exception:
+        pass
 
-async def save_cfg(data):
-    async with cfg_lock:
-        with open(CONFIG, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+async def restore_config_from_telegram(bot):
+    """Restore config from Telegram Saved Messages on startup."""
+    try:
+        async for msg in bot.iter_messages("me", search=CONFIG_BACKUP_TAG):
+            text = msg.text or ""
+            if CONFIG_BACKUP_TAG in text:
+                json_part = text.replace(CONFIG_BACKUP_TAG, "").strip()
+                cfg = json.loads(json_part)
+                save_config(cfg)
+                print("✅ Config restored from Telegram backup!")
+                return cfg
+    except Exception as e:
+        print(f"⚠️ Could not restore backup: {e}")
+    return None
 
+def log(label, msg):
+    ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    path = os.path.join(LOGS_DIR, f"{label}.log")
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
 
-# =========================
-# HELPERS
-# =========================
-def is_owner(uid: int):
-    return uid == OWNER_ID
+# ─────────────────────────────────────────────
+#  STATE
+# ─────────────────────────────────────────────
 
+state          = {}
+broadcast_task = None
 
-def sanitize_phone(phone: str):
-    return phone.strip().replace(" ", "")
+# ─────────────────────────────────────────────
+#  HELPERS
+# ─────────────────────────────────────────────
 
+def make_client(session_string=None):
+    session = StringSession(session_string) if session_string else StringSession()
+    return TelegramClient(session, SHARED_API_ID, SHARED_API_HASH)
 
-def sanitize_otp(otp: str):
-    return "".join(ch for ch in otp if ch.isdigit())
+async def get_groups(client):
+    groups = []
+    async for dialog in client.iter_dialogs():
+        e = dialog.entity
+        if isinstance(e, Chat):
+            groups.append(dialog)
+        elif isinstance(e, Channel) and e.megagroup:
+            groups.append(dialog)
+    return groups
 
-
-def make_label(cfg):
-    existing = cfg["accounts"].keys()
-    i = 1
-    while f"acc{i}" in existing:
-        i += 1
-    return f"acc{i}"
-
+async def get_saved_message(client):
+    msgs = await client.get_messages("me", limit=1)
+    return msgs[0] if msgs else None
 
 def dashboard_buttons():
     return [
-        [Button.inline("➕ Add Account", b"add")],
-        [Button.inline("📂 Accounts", b"accs"), Button.inline("❌ Remove", b"del")],
-        [Button.inline("▶ Start Ads", b"start"), Button.inline("⏹ Stop Ads", b"stop")],
-        [Button.inline("⏱ Set Interval", b"interval")],
-        [Button.inline("♻ Refresh", b"refresh")]
+        [Button.inline("➕ Add Accounts",   b"add_acc"),    Button.inline("👥 My Accounts",  b"my_acc")],
+        [Button.inline("⏱ Set Interval",    b"set_interval")],
+        [Button.inline("▶️ Start Ads",       b"start_ads"),  Button.inline("⏹ Stop Ads",     b"stop_ads")],
+        [Button.inline("🗑 Delete Accounts", b"del_acc")],
     ]
 
-
-async def send_or_edit_dashboard(event, text="Ads Dashboard Ready"):
-    global dashboard_message_id
-
-    try:
-        if dashboard_message_id:
-            await event.client.edit_message(
-                event.chat_id,
-                dashboard_message_id,
-                text,
-                buttons=dashboard_buttons()
-            )
-        else:
-            msg = await event.respond(text, buttons=dashboard_buttons())
-            dashboard_message_id = msg.id
-    except:
-        msg = await event.respond(text, buttons=dashboard_buttons())
-        dashboard_message_id = msg.id
-
-
-async def safe_reply(event, text, buttons=None):
-    try:
-        return await event.respond(text, buttons=buttons)
-    except:
-        return None
-
-
-async def create_logs_channel(client, label):
-    result = await client(
-        CreateChannelRequest(
-            title=f"{label} Logs",
-            about="Account logs",
-            megagroup=False
-        )
+async def send_dashboard(bot, chat_id, msg_to_edit=None):
+    cfg       = load_config()
+    acc_count = len(cfg["accounts"])
+    status    = "🚀 Running" if cfg.get("broadcasting") else "⏸ Stopped"
+    text = (
+        f"🎛 **Ads DASHBOARD**\n\n"
+        f"• Hosted Accounts: **{acc_count}**\n"
+        f"• Cycle Interval: **{cfg['interval']}s**\n"
+        f"• Advertising Status: **{status}**\n\n"
+        f"Choose an action below to continue"
     )
-    return result.chats[0].id
-
-
-# =========================
-# BROADCAST LOOP
-# =========================
-async def broadcast_account_loop(label, acc):
-    client = TelegramClient(acc["session"], API_ID, API_HASH)
-
+    buttons = dashboard_buttons()
     try:
-        await client.start()
-        print(f"[+] Started broadcast for {label}")
+        if msg_to_edit:
+            await msg_to_edit.edit(text, buttons=buttons)
+            return
+    except Exception:
+        pass
+    await bot.send_message(chat_id, text, buttons=buttons)
 
-        while True:
-            cfg = load_cfg()
-            interval = cfg.get("interval", DEFAULT_INTERVAL)
+# ─────────────────────────────────────────────
+#  BROADCAST
+# ─────────────────────────────────────────────
 
+async def broadcast_account(label, acc, interval, bot, owner_id):
+    try:
+        client = make_client(acc["session_string"])
+        await client.connect()
+        msg = await get_saved_message(client)
+        if not msg:
+            log(label, "No message in Saved Messages.")
+            await client.disconnect()
+            return
+        groups  = await get_groups(client)
+        success = 0
+        failed  = 0
+        for dialog in groups:
             try:
-                msg = await client.get_messages("me", limit=1)
-                if not msg:
-                    await asyncio.sleep(CYCLE_DELAY)
-                    continue
-
-                message = msg[0]
-                success = 0
-                failed = 0
-
-                async for dialog in client.iter_dialogs():
-                    if not dialog.is_group:
-                        continue
-
-                    try:
-                        if message.media:
-                            await client.send_file(
-                                dialog.id,
-                                message.media,
-                                caption=message.text or ""
-                            )
-                        else:
-                            await client.send_message(dialog.id, message.text or "")
-
-                        success += 1
-
-                        try:
-                            await client.send_message(
-                                acc["log_channel"],
-                                f"Sent → {dialog.name}"
-                            )
-                        except:
-                            pass
-
-                        await asyncio.sleep(random.randint(interval, interval + 30))
-
-                    except FloodWaitError as e:
-                        try:
-                            await client.send_message(
-                                acc["log_channel"],
-                                f"Flood wait {e.seconds}s"
-                            )
-                        except:
-                            pass
-                        await asyncio.sleep(e.seconds)
-
-                    except Exception as ex:
-                        failed += 1
-                        try:
-                            await client.send_message(
-                                acc["log_channel"],
-                                f"Failed → {dialog.name}\nReason: {str(ex)}"
-                            )
-                        except:
-                            pass
-
-                try:
-                    await client.send_message(
-                        acc["log_channel"],
-                        f"Cycle done\nSuccess: {success}\nFailed: {failed}"
-                    )
-                except:
-                    pass
-
-                await asyncio.sleep(CYCLE_DELAY)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as ex:
-                print(f"[Loop Error {label}] {ex}")
-                await asyncio.sleep(10)
-
-    finally:
+                if msg.text:
+                    await client.send_message(dialog.entity, msg.text)
+                elif msg.media:
+                    await client.send_file(dialog.entity, msg.media, caption=msg.text or "")
+                success += 1
+            except Exception as e:
+                failed += 1
+                log(label, f"Failed → {dialog.name}: {e}")
+            await asyncio.sleep(interval)
+        log(label, f"Round done — ✅ {success} sent ❌ {failed} failed")
         await client.disconnect()
-        print(f"[-] Stopped broadcast for {label}")
+    except Exception as e:
+        log(label, f"Error: {e}")
 
-
-async def start_accounts():
-    cfg = load_cfg()
-
-    for label, acc in cfg["accounts"].items():
-        if label not in account_tasks:
-            task = asyncio.create_task(broadcast_account_loop(label, acc))
-            account_tasks[label] = task
-
-
-async def stop_accounts():
-    for label, task in list(account_tasks.items()):
-        task.cancel()
-    account_tasks.clear()
-
-
-async def stop_single_account(label):
-    if label in account_tasks:
-        account_tasks[label].cancel()
-        del account_tasks[label]
-
-
-# =========================
-# LOGIN FLOW
-# =========================
-async def begin_login(uid, phone):
-    cfg = load_cfg()
-    label = make_label(cfg)
-
-    if uid in state and state[uid].get("step") in ["otp", "2fa", "phone", "interval"]:
-        return False, "A login flow is already active. Finish it first."
-
-    for _, acc in cfg["accounts"].items():
-        if acc.get("phone") == phone:
-            return False, "This phone/account is already added."
-
-    client = TelegramClient(f"session_{label}", API_ID, API_HASH)
-
+async def broadcast_loop(bot, owner_id):
+    active_seconds = REST_HOURS * 3600
+    rest_seconds   = REST_DURATION * 3600
+    await bot.send_message(owner_id, "▶️ Broadcasting started for all accounts.")
     try:
-        await client.connect()
+        while True:
+            phase_start = asyncio.get_event_loop().time()
+            cfg = load_config()
+            cfg["broadcasting"] = True
+            save_config(cfg)
+            while asyncio.get_event_loop().time() - phase_start < active_seconds:
+                cfg      = load_config()
+                interval = cfg["interval"]
+                accounts = cfg["accounts"]
+                if accounts:
+                    await asyncio.gather(*[
+                        broadcast_account(label, acc, interval, bot, owner_id)
+                        for label, acc in accounts.items()
+                    ])
+                await asyncio.sleep(5)
+            cfg = load_config()
+            cfg["broadcasting"] = False
+            save_config(cfg)
+            await bot.send_message(owner_id, f"😴 Rest period ({REST_DURATION}hr). Resumes automatically.")
+            await asyncio.sleep(rest_seconds)
+            await bot.send_message(owner_id, "🟢 Rest over! Resuming...")
+    except asyncio.CancelledError:
+        cfg = load_config()
+        cfg["broadcasting"] = False
+        save_config(cfg)
+        await bot.send_message(owner_id, "⏹ Broadcasting stopped.")
 
-        result = await client.send_code_request(phone)
+# ─────────────────────────────────────────────
+#  BOT
+# ─────────────────────────────────────────────
 
-        await client.disconnect()
-
-        state[uid] = {
-            "step": "otp",
-            "phone": phone,
-            "hash": result.phone_code_hash,
-            "label": label,
-        }
-
-        return True, f"OTP sent to {phone}\n\nNow send OTP digits only."
-
-    except FloodWaitError as e:
-        try:
-            await client.disconnect()
-        except:
-            pass
-        return False, f"Too many OTP requests.\nWait {e.seconds} seconds."
-
-    except Exception as ex:
-        try:
-            await client.disconnect()
-        except:
-            pass
-        return False, f"Failed to send OTP:\n{str(ex)}"
-
-
-async def complete_login_with_otp(uid, otp):
-    if uid not in state:
-        return False, "No active OTP session found."
-
-    s = state[uid]
-
-    if s.get("step") != "otp":
-        return False, "You're not in OTP step."
-
-    otp = sanitize_otp(otp)
-
-    if len(otp) < 5:
-        return False, "OTP incomplete. Send full OTP digits only."
-
-    client = TelegramClient(f"session_{s['label']}", API_ID, API_HASH)
-
-    try:
-        await client.connect()
-
-        await client.sign_in(
-            phone=s["phone"],
-            code=otp,
-            phone_code_hash=s["hash"]
-        )
-
-        me = await client.get_me()
-        log_channel = await create_logs_channel(client, s["label"])
-
-        cfg = load_cfg()
-        cfg["accounts"][s["label"]] = {
-            "session": f"session_{s['label']}",
-            "name": me.first_name or "NoName",
-            "log_channel": log_channel,
-            "phone": s["phone"]
-        }
-        await save_cfg(cfg)
-
-        await client.disconnect()
-        del state[uid]
-
-        return True, f"Account added successfully: {me.first_name or 'NoName'}"
-
-    except SessionPasswordNeededError:
-        try:
-            await client.disconnect()
-        except:
-            pass
-
-        state[uid]["step"] = "2fa"
-        return False, "2FA enabled. Send your password."
-
-    except PhoneCodeInvalidError:
-        try:
-            await client.disconnect()
-        except:
-            pass
-        return False, "Invalid OTP. Use latest OTP only."
-
-    except PhoneCodeExpiredError:
-        try:
-            await client.disconnect()
-        except:
-            pass
-
-        del state[uid]
-        return False, "OTP expired. Start again from Add Account."
-
-    except Exception as ex:
-        try:
-            await client.disconnect()
-        except:
-            pass
-        return False, f"Login failed:\n{str(ex)}"
-
-
-async def complete_login_with_2fa(uid, password):
-    if uid not in state:
-        return False, "No active 2FA session found."
-
-    s = state[uid]
-
-    if s.get("step") != "2fa":
-        return False, "You're not in 2FA step."
-
-    client = TelegramClient(f"session_{s['label']}", API_ID, API_HASH)
-
-    try:
-        await client.connect()
-        await client.sign_in(password=password.strip())
-
-        me = await client.get_me()
-        log_channel = await create_logs_channel(client, s["label"])
-
-        cfg = load_cfg()
-        cfg["accounts"][s["label"]] = {
-            "session": f"session_{s['label']}",
-            "name": me.first_name or "NoName",
-            "log_channel": log_channel,
-            "phone": s["phone"]
-        }
-        await save_cfg(cfg)
-
-        await client.disconnect()
-        del state[uid]
-
-        return True, f"Account added successfully: {me.first_name or 'NoName'}"
-
-    except PasswordHashInvalidError:
-        try:
-            await client.disconnect()
-        except:
-            pass
-        return False, "Wrong 2FA password. Try again."
-
-    except Exception as ex:
-        try:
-            await client.disconnect()
-        except:
-            pass
-        return False, f"2FA login failed:\n{str(ex)}"
-
-
-# =========================
-# MAIN BOT
-# =========================
 async def run_bot():
-    bot = TelegramClient("bot_session", API_ID, API_HASH)
+    global broadcast_task
 
-    while True:
-        try:
-            await bot.start(bot_token=BOT_TOKEN)
-            break
-        except FloodWaitError as e:
-            wait_time = e.seconds + 5
-            print(f"[BOT FLOOD WAIT] Waiting {wait_time} seconds before retry...")
-            await asyncio.sleep(wait_time)
+    bot = TelegramClient("dash_bot_session", SHARED_API_ID, SHARED_API_HASH)
+    await bot.start(bot_token=BOT_TOKEN)
+    me  = await bot.get_me()
+    print(f"✅ Bot running: @{me.username}")
 
-    print("[+] Bot started successfully")
+    # Try to restore config from Telegram on startup
+    cfg = load_config()
+    if not cfg["accounts"]:
+        restored = await restore_config_from_telegram(bot)
+        if restored:
+            print(f"✅ Restored {len(restored['accounts'])} accounts from backup!")
 
     @bot.on(events.NewMessage(pattern="/start"))
-    async def start_cmd(event):
-        if not is_owner(event.sender_id):
-            return
-        await send_or_edit_dashboard(event)
-
-    @bot.on(events.CallbackQuery)
-    async def callback(event):
+    async def cmd_start(event):
+        cfg = load_config()
         uid = event.sender_id
-
-        if not is_owner(uid):
-            await event.answer("Unauthorized", alert=True)
+        if cfg["owner_id"] == 0:
+            cfg["owner_id"] = uid
+            save_config(cfg)
+            await backup_config_to_telegram(bot, cfg)
+        elif uid != cfg["owner_id"]:
+            await event.respond("❌ Unauthorized.")
             return
+        await send_dashboard(bot, uid)
 
-        # Create lock per user if not exists
-        if uid not in user_locks:
-            user_locks[uid] = asyncio.Lock()
+    @bot.on(events.CallbackQuery())
+    async def callback_handler(event):
+        global broadcast_task
+        uid  = event.sender_id
+        data = event.data.decode()
+        await event.answer()
+        cfg = load_config()
+        if uid != cfg["owner_id"]:
+            return
+        msg = await event.get_message()
 
-        # ✅ FIX: time check is INSIDE the lock — atomic check+update
-        # prevents double-trigger race condition where two events
-        # both pass the check before either one updates last_click
-        async with user_locks[uid]:
-            now = time.time()
-            last = last_click.get(uid, 0)
+        if data == "dashboard":
+            await send_dashboard(bot, uid, msg_to_edit=msg)
 
-            if now - last < 1.2:
-                await event.answer("Wait...", alert=False)
+        elif data == "my_acc":
+            cfg = load_config()
+            if not cfg["accounts"]:
+                await bot.send_message(uid, "❌ No accounts added yet.")
                 return
+            lines = ["👥 **Hosted Accounts:**\n"]
+            for i, (label, acc) in enumerate(cfg["accounts"].items(), 1):
+                lines.append(f"{i}. `{label}` — {acc['name']}")
+            await bot.send_message(uid, "\n".join(lines),
+                buttons=[[Button.inline("⬅️ Back to Dashboard", b"dashboard")]])
 
-            last_click[uid] = now  # update immediately inside lock
+        elif data == "add_acc":
+            state[uid] = {"step": "wait_phone", "data": {}}
+            await bot.send_message(uid,
+                "➕ **Add New Account**\n\n"
+                "Send your **phone number** with country code:\n"
+                "_(e.g. `+12025551234`)_")
 
-            data = event.data.decode()
-            await event.answer()
+        elif data == "set_interval":
+            cfg = load_config()
+            state[uid] = {"step": "wait_interval", "data": {}}
+            await bot.send_message(uid,
+                f"⏱ **Set Time Interval**\n\nCurrent: **{cfg['interval']}s**\n\n"
+                "Send new interval in seconds _(minimum 10)_:")
 
-            cfg = load_cfg()
+        elif data == "start_ads":
+            cfg = load_config()
+            if not cfg["accounts"]:
+                await bot.send_message(uid, "❌ No accounts added!")
+                return
+            if broadcast_task and not broadcast_task.done():
+                await bot.send_message(uid, "⚠️ Already running!")
+                return
+            broadcast_task = asyncio.create_task(broadcast_loop(bot, uid))
+            cfg["broadcasting"] = True
+            save_config(cfg)
+            await send_dashboard(bot, uid, msg_to_edit=msg)
 
-            if data == "refresh":
-                await send_or_edit_dashboard(event, "Dashboard refreshed.")
+        elif data == "stop_ads":
+            if broadcast_task and not broadcast_task.done():
+                broadcast_task.cancel()
+            cfg = load_config()
+            cfg["broadcasting"] = False
+            save_config(cfg)
+            await send_dashboard(bot, uid, msg_to_edit=msg)
 
-            elif data == "start":
-                await start_accounts()
-                await send_or_edit_dashboard(event, "Ads started.")
+        elif data == "del_acc":
+            cfg = load_config()
+            if not cfg["accounts"]:
+                await bot.send_message(uid, "❌ No accounts to delete.")
+                return
+            buttons = []
+            for label, acc in cfg["accounts"].items():
+                buttons.append([Button.inline(f"🗑 {acc['name']}", f"confirm_del_{label}".encode())])
+            buttons.append([Button.inline("⬅️ Back to Dashboard", b"dashboard")])
+            await bot.send_message(uid, "🗑 **Select account to delete:**", buttons=buttons)
 
-            elif data == "stop":
-                await stop_accounts()
-                await send_or_edit_dashboard(event, "Ads stopped.")
+        elif data.startswith("confirm_del_"):
+            label = data.replace("confirm_del_", "")
+            cfg   = load_config()
+            if label in cfg["accounts"]:
+                name = cfg["accounts"][label]["name"]
+                del cfg["accounts"][label]
+                save_config(cfg)
+                await backup_config_to_telegram(bot, cfg)
+                await bot.send_message(uid, f"✅ **{name}** deleted.")
+            await send_dashboard(bot, uid)
 
-            elif data == "interval":
-                state[uid] = {"step": "interval"}
-                await safe_reply(event, "Send interval in seconds.\nExample: 90")
-
-            elif data == "accs":
-                if not cfg["accounts"]:
-                    await safe_reply(event, "No accounts added yet.")
-                    return
-
-                txt = "Accounts:\n\n"
-                for label, acc in cfg["accounts"].items():
-                    txt += f"{label} → {acc['name']} ({acc.get('phone', 'NoPhone')})\n"
-
-                await safe_reply(event, txt)
-
-            elif data == "add":
-                if uid in state:
-                    del state[uid]
-
-                state[uid] = {"step": "phone"}
-                await safe_reply(event, "Send phone number with country code.\nExample: +919876543210")
-
-            elif data == "del":
-                if not cfg["accounts"]:
-                    await safe_reply(event, "No accounts to remove.")
-                    return
-
-                buttons = []
-                for label, acc in cfg["accounts"].items():
-                    buttons.append(
-                        [Button.inline(f"{acc['name']} ({label})", f"del_{label}".encode())]
-                    )
-
-                await safe_reply(event, "Select account to remove:", buttons=buttons)
-
-            elif data.startswith("del_"):
-                label = data.replace("del_", "")
-
-                if label in cfg["accounts"]:
-                    await stop_single_account(label)
-                    del cfg["accounts"][label]
-                    await save_cfg(cfg)
-                    await safe_reply(event, f"{label} removed successfully.")
-
-    @bot.on(events.NewMessage)
-    async def handler(event):
+    @bot.on(events.NewMessage())
+    async def text_handler(event):
+        cfg = load_config()
         uid = event.sender_id
-
-        if not is_owner(uid):
+        if event.text and event.text.startswith("/"):
             return
-
-        if event.raw_text.startswith("/"):
+        if uid != cfg["owner_id"]:
             return
-
         if uid not in state:
             return
+        s    = state[uid]
+        step = s["step"]
+        text = (event.text or "").strip()
 
-        step = state[uid].get("step")
-        text = event.raw_text.strip()
-
-        if step == "interval":
-            try:
-                val = int(text)
-                if val < 10:
-                    await safe_reply(event, "Too low. Keep interval at least 10 seconds.")
-                    return
-
-                cfg = load_cfg()
-                cfg["interval"] = val
-                await save_cfg(cfg)
-
-                del state[uid]
-                await safe_reply(event, f"Interval updated to {val} seconds.")
-                await send_or_edit_dashboard(event)
-
-            except:
-                await safe_reply(event, "Send a valid number.\nExample: 90")
-
-        elif step == "phone":
-            phone = sanitize_phone(text)
-
-            if not re.fullmatch(r"\+\d{8,15}", phone):
-                await safe_reply(event, "Invalid phone format.\nExample: +919876543210")
+        if step == "wait_interval":
+            clean = "".join(filter(str.isdigit, text))
+            if not clean or int(clean) < 10:
+                await event.respond("❌ Minimum 10 seconds. Try again:")
                 return
+            cfg["interval"] = int(clean)
+            save_config(cfg)
+            del state[uid]
+            await event.respond(f"✅ Interval set to **{clean}s**!")
+            await send_dashboard(bot, uid)
 
-            ok, msg = await begin_login(uid, phone)
-            await safe_reply(event, msg)
+        elif step == "wait_phone":
+            if not text.startswith("+"):
+                await event.respond("❌ Include country code e.g. `+12025551234`")
+                return
+            await event.respond("📱 Sending OTP to your Telegram app...")
+            try:
+                cfg    = load_config()
+                label  = f"acc{len(cfg['accounts']) + 1}"
+                client = make_client()
+                await client.connect()
+                try:
+                    result = await client.send_code_request(text)
+                except AuthRestartError:
+                    await client.disconnect()
+                    client = make_client()
+                    await client.connect()
+                    result = await client.send_code_request(text)
+                s["data"]["phone"]      = text
+                s["data"]["phone_hash"] = result.phone_code_hash
+                s["data"]["client"]     = client
+                s["data"]["label"]      = label
+                s["step"] = "wait_otp"
+                await event.respond("✅ OTP sent!\n\nEnter the **OTP code** from your Telegram app:")
+            except Exception as e:
+                await event.respond(f"❌ Error: {e}\n\nPress ➕ Add Accounts to try again.")
+                del state[uid]
 
-            if not ok:
-                if uid in state and state[uid].get("step") == "phone":
-                    del state[uid]
+        elif step == "wait_otp":
+            client = s["data"]["client"]
+            try:
+                clean_otp = "".join(filter(str.isdigit, text))
+                await client.sign_in(
+                    phone=s["data"]["phone"],
+                    code=clean_otp,
+                    phone_code_hash=s["data"]["phone_hash"]
+                )
+                me             = await client.get_me()
+                session_string = client.session.save()
+                await client.disconnect()
+                label = s["data"]["label"]
+                cfg   = load_config()
+                cfg["accounts"][label] = {
+                    "session_string": session_string,
+                    "name":           f"{me.first_name} (@{me.username})",
+                    "phone":          s["data"]["phone"],
+                }
+                save_config(cfg)
+                # Backup to Telegram — survives Railway restart!
+                await backup_config_to_telegram(bot, cfg)
+                del state[uid]
+                log(label, f"Account added: {me.first_name} (@{me.username})")
+                await event.respond(
+                    f"✅ **{me.first_name}** (@{me.username}) added!\n"
+                    f"🔒 Session backed up to Telegram — safe from restarts!")
+                await send_dashboard(bot, uid)
+            except SessionPasswordNeededError:
+                s["step"] = "wait_2fa"
+                await event.respond("🔒 2FA enabled. Enter your Telegram password:")
+            except Exception as e:
+                await event.respond(f"❌ Wrong OTP: {e}\n\nPress ➕ Add Accounts to try again.")
+                await client.disconnect()
+                del state[uid]
 
-        elif step == "otp":
-            ok, msg = await complete_login_with_otp(uid, text)
-            await safe_reply(event, msg)
-
-            if ok:
-                await send_or_edit_dashboard(event)
-
-        elif step == "2fa":
-            ok, msg = await complete_login_with_2fa(uid, text)
-            await safe_reply(event, msg)
-
-            if ok:
-                await send_or_edit_dashboard(event)
+        elif step == "wait_2fa":
+            client = s["data"]["client"]
+            try:
+                await client.sign_in(password=text)
+                me             = await client.get_me()
+                session_string = client.session.save()
+                await client.disconnect()
+                label = s["data"]["label"]
+                cfg   = load_config()
+                cfg["accounts"][label] = {
+                    "session_string": session_string,
+                    "name":           f"{me.first_name} (@{me.username})",
+                    "phone":          s["data"]["phone"],
+                }
+                save_config(cfg)
+                await backup_config_to_telegram(bot, cfg)
+                del state[uid]
+                log(label, f"Account added (2FA): {me.first_name} (@{me.username})")
+                await event.respond(
+                    f"✅ **{me.first_name}** (@{me.username}) added!\n"
+                    f"🔒 Session backed up to Telegram — safe from restarts!")
+                await send_dashboard(bot, uid)
+            except Exception as e:
+                await event.respond(f"❌ Wrong password: {e}\n\nPress ➕ Add Accounts to try again.")
+                await client.disconnect()
+                del state[uid]
 
     await bot.run_until_disconnected()
-
 
 if __name__ == "__main__":
     asyncio.run(run_bot())

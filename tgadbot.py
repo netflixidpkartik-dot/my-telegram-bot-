@@ -1,12 +1,4 @@
-⚠️  IMPORTANT — APNA API ID/HASH DAALO
-# 1. my.telegram.org pe jao
-# 2. Login karo
-# 3. API Development Tools → Create App
-# 4. api_id aur api_hash copy karo → neeche daalo
-#
-# ⚠️  RAILWAY PE MAT CHALAO — APNE PC PE CHALAO
-# CMD mein: python tg_broadcaster_dash.py
-#
+
 """
 Telegram Group Broadcaster — Railway Safe Edition
 - String sessions saved in Telegram Saved Messages (survives Railway restart!)
